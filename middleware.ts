@@ -2,28 +2,38 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 export function middleware(request: NextRequest) {
-  
-  // 1. Check if the user's browser has the secure badge we created
-  const hasAccessBadge = request.cookies.has('hmp_access_token');
-  
-  // 2. Check if the user is currently trying to load the login page
-  const isLoginPage = request.nextUrl.pathname === '/login';
+  const path = request.nextUrl.pathname;
 
-  // SCENARIO A: No badge, and trying to access a secure page? Kick them to login.
-  if (!hasAccessBadge && !isLoginPage) {
+  // 1. STUDENT LANE: Security rules for the portal
+  if (path.startsWith('/portal')) {
+    const hasStudentBadge = request.cookies.has('hmp_student_token');
+    
+    // If they have no badge and are trying to view the portal, send to student login
+    if (!hasStudentBadge && path !== '/portal-login') {
+      return NextResponse.redirect(new URL('/portal-login', request.url));
+    }
+    // If they have a badge and try to log in again, send to portal
+    if (hasStudentBadge && path === '/portal-login') {
+      return NextResponse.redirect(new URL('/portal', request.url));
+    }
+    return NextResponse.next();
+  }
+
+  // 2. ADMIN LANE: Security rules for the main dashboard
+  const hasAdminBadge = request.cookies.has('hmp_access_token');
+  const isAdminLogin = path === '/login';
+
+  if (!hasAdminBadge && !isAdminLogin) {
     return NextResponse.redirect(new URL('/login', request.url));
   }
 
-  // SCENARIO B: Has a badge, but trying to view the login page again? Send to dashboard.
-  if (hasAccessBadge && isLoginPage) {
+  if (hasAdminBadge && isAdminLogin) {
     return NextResponse.redirect(new URL('/', request.url));
   }
 
-  // SCENARIO C: Has a badge and accessing a secure page. Let them pass!
   return NextResponse.next();
 }
 
-// 3. Apply this security check to every page EXCEPT background Next.js files/images
 export const config = {
   matcher: ['/((?!api|_next/static|_next/image|favicon.ico).*)'],
 };
