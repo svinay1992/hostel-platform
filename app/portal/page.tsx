@@ -5,7 +5,6 @@ import { redirect } from 'next/navigation';
 
 export default async function StudentPortal() {
   
-  // 1. DYNAMIC MAGIC: Read the badge from the browser
   const cookieStore = await cookies();
   const studentToken = cookieStore.get('hmp_student_token');
 
@@ -15,41 +14,43 @@ export default async function StudentPortal() {
 
   const myStudentId = parseInt(studentToken.value); 
 
-  // 2. Fetch Student's Profile and Room details
   const { data: profileData } = await supabase
     .from('students')
     .select('phone_number, users(name, email), beds(bed_number, rooms(room_number))')
     .eq('id', myStudentId)
     .single();
 
+  // BULLETPROOF TYPESCRIPT BYPASS
   const profile: any = profileData;
-  const studentName = profile?.users?.name || (profile?.users?.[0]?.name) || 'Unknown Student';
-  const roomNumber = profile?.beds?.rooms?.room_number || (profile?.beds?.rooms?.[0]?.room_number) || (profile?.beds?.[0]?.rooms?.room_number) || 'N/A';
-  const bedNumber = profile?.beds?.bed_number || (profile?.beds?.[0]?.bed_number) || 'N/A';
+  const userData: any = profile?.users;
+  const bedData: any = profile?.beds;
+  const roomData: any = bedData?.rooms || bedData?.[0]?.rooms;
 
-  // 3. Fetch Student's Rent Invoices
+  const studentName = userData?.name || userData?.[0]?.name || 'Unknown Student';
+  const roomNumber = roomData?.room_number || roomData?.[0]?.room_number || 'N/A';
+  const bedNumber = bedData?.bed_number || bedData?.[0]?.bed_number || 'N/A';
+
   const { data: myInvoices } = await supabase
     .from('invoices')
     .select('*')
     .eq('student_id', myStudentId)
     .order('invoice_date', { ascending: false });
 
-  // 4. Fetch the Mess Menu
-  const todayMenuDay = 'Wednesday'; 
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const todayMenuDay = days[new Date().getDay()]; 
+  
   const { data: todaysMenu } = await supabase
     .from('mess_menu')
     .select('*')
     .eq('day_of_week', todayMenuDay)
     .single();
 
-  // 5. NEW: Fetch the latest Announcements (Limit to top 3)
   const { data: notices } = await supabase
     .from('notices')
     .select('*')
     .order('created_at', { ascending: false })
     .limit(3);
 
-  // 6. SERVER ACTION: Submit a Maintenance Complaint
   async function submitComplaint(formData: FormData) {
     'use server';
     const issueType = formData.get('issue_type') as string;
@@ -65,7 +66,6 @@ export default async function StudentPortal() {
     revalidatePath('/portal');
   }
 
-  // 7. SERVER ACTION: Securely Log Out
   async function handleLogout() {
     'use server';
     const cookieStore = await cookies();
@@ -76,7 +76,6 @@ export default async function StudentPortal() {
   return (
     <div className="absolute inset-0 z-50 bg-gray-50 flex flex-col font-sans overflow-y-auto">
       
-      {/* PORTAL HEADER */}
       <header className="bg-indigo-600 text-white p-6 shadow-md">
         <div className="max-w-5xl mx-auto flex justify-between items-center">
           <div>
@@ -98,13 +97,10 @@ export default async function StudentPortal() {
         </div>
       </header>
 
-      {/* PORTAL CONTENT */}
       <main className="flex-1 max-w-5xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         
-        {/* LEFT COLUMN: Notices, Rent & Food */}
         <div className="lg:col-span-2 flex flex-col gap-6">
           
-          {/* THE NEW NOTICE BOARD */}
           {notices && notices.length > 0 && (
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
               <div className="p-4 border-b border-gray-100 bg-yellow-50 flex items-center gap-2">
@@ -128,7 +124,6 @@ export default async function StudentPortal() {
             </div>
           )}
 
-          {/* MY RENT SECTION */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             <div className="p-5 border-b border-gray-100 flex justify-between items-center">
               <h3 className="text-lg font-bold text-gray-800">My Rent Invoices</h3>
@@ -159,7 +154,6 @@ export default async function StudentPortal() {
             </div>
           </div>
 
-          {/* TODAY'S MESS MENU */}
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
             <div className="p-5 border-b border-gray-100">
               <h3 className="text-lg font-bold text-gray-800">Today's Menu ({todayMenuDay})</h3>
@@ -182,7 +176,6 @@ export default async function StudentPortal() {
 
         </div>
 
-        {/* RIGHT COLUMN: Helpdesk Form */}
         <div className="lg:col-span-1">
           <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6">
             <h3 className="text-lg font-bold text-gray-800 mb-4">Report an Issue</h3>

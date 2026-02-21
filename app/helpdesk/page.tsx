@@ -1,134 +1,154 @@
+// THE ULTIMATE CACHE BUSTER: Forces Next.js to fetch fresh data every single second
+export const dynamic = 'force-dynamic';
+
 import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
 
 export default async function HelpdeskPage() {
   
-  // 1. Fetch all complaints, joining the student's name and their room number
+  // 1. Fetch complaints safely, ordered by ID to prevent missing column errors!
   const { data: tickets } = await supabase
     .from('complaints')
-    .select(`
-      id,
-      issue_type,
-      description,
-      status,
-      reported_at,
-      students (
-        users (name),
-        beds (rooms(room_number))
-      )
-    `)
-    .order('reported_at', { ascending: false });
+    .select('*')
+    .order('id', { ascending: false });
 
-  // Calculate quick totals
-  const openTickets = tickets?.filter(t => t.status === 'Open').length || 0;
-  const inProgressTickets = tickets?.filter(t => t.status === 'In Progress').length || 0;
+  // 2. Fetch students safely
+  const { data: students } = await supabase
+    .from('students')
+    .select('id, phone_number, users(name), beds(bed_number, rooms(room_number))');
 
-  // 2. SERVER ACTION: Mark a complaint as Resolved
+  // 3. SERVER ACTION: Mark Resolved
   async function resolveTicket(formData: FormData) {
     'use server';
-    const ticketId = formData.get('ticket_id');
-    
-    await supabase
-      .from('complaints')
-      .update({ status: 'Resolved' })
-      .eq('id', ticketId);
-      
+    const ticket_id = formData.get('ticket_id') as string;
+    await supabase.from('complaints').update({ status: 'Resolved' }).eq('id', ticket_id);
     revalidatePath('/helpdesk');
-    revalidatePath('/'); // Updates the main dashboard counter too!
+    revalidatePath('/'); 
   }
 
+  // 4. SERVER ACTION: Delete Ticket
+  async function deleteTicket(formData: FormData) {
+    'use server';
+    const ticket_id = formData.get('ticket_id') as string;
+    await supabase.from('complaints').delete().eq('id', ticket_id);
+    revalidatePath('/helpdesk');
+    revalidatePath('/');
+  }
+
+  const openTickets = tickets?.filter((t: any) => t.status === 'Open') || [];
+  const resolvedTickets = tickets?.filter((t: any) => t.status === 'Resolved') || [];
+
   return (
-    <div className="flex h-screen bg-gray-50 font-sans">
-      
-     
+    <main className="flex-1 p-10 overflow-y-auto bg-gray-50 h-full font-sans">
+      <header className="mb-10">
+        <h2 className="text-3xl font-extrabold text-gray-800 tracking-tight">🛠️ Helpdesk & Maintenance</h2>
+        <p className="text-gray-500 mt-1">Manage student complaints and facility repairs.</p>
+      </header>
 
-      {/* MAIN CONTENT AREA */}
-      <main className="flex-1 p-10 overflow-y-auto">
-        <header className="mb-8 flex justify-between items-center">
-          <div>
-            <h2 className="text-3xl font-bold text-gray-800">Maintenance Helpdesk</h2>
-            <p className="text-gray-500 mt-1">Track and resolve student complaints.</p>
-          </div>
-        </header>
+      {/* QUICK STATS */}
+      <div className="flex gap-4 mb-8">
+        <div className="bg-white px-6 py-4 rounded-xl shadow-sm border border-red-100 flex-1">
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Action Required</p>
+          <p className="text-3xl font-extrabold text-red-500">{openTickets.length} Open</p>
+        </div>
+        <div className="bg-white px-6 py-4 rounded-xl shadow-sm border border-green-100 flex-1">
+          <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-1">Completed</p>
+          <p className="text-3xl font-extrabold text-green-500">{resolvedTickets.length} Resolved</p>
+        </div>
+      </div>
 
-        {/* HELPDESK MINI-DASHBOARD */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 border-l-4 border-l-orange-500">
-            <h3 className="text-gray-500 text-sm font-semibold uppercase tracking-wider">Open Tickets</h3>
-            <p className="text-4xl font-bold text-gray-800 mt-2">{openTickets}</p>
-          </div>
-          <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 border-l-4 border-l-blue-500">
-            <h3 className="text-gray-500 text-sm font-semibold uppercase tracking-wider">In Progress</h3>
-            <p className="text-4xl font-bold text-gray-800 mt-2">{inProgressTickets}</p>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-8">
+        
+        {/* LEFT COLUMN: ACTIVE TICKETS */}
+        <div>
+          <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">🚨 Active Issues</h3>
+          <div className="flex flex-col gap-4">
+            {openTickets.map((ticket: any) => {
+              
+              const matchedStudent = students?.find((s: any) => s.id === ticket.student_id);
+              
+              const userData: any = matchedStudent?.users;
+              const bedData: any = matchedStudent?.beds;
+              const roomData: any = bedData?.rooms || bedData?.[0]?.rooms;
+
+              const studentName = userData?.name || userData?.[0]?.name || 'Unknown Student';
+              const roomNum = roomData?.room_number || roomData?.[0]?.room_number || '?';
+              const bedNum = bedData?.bed_number || bedData?.[0]?.bed_number || '?';
+              const phone = matchedStudent?.phone_number || '';
+
+              // Safely handle the date just in case 'created_at' doesn't exist
+              const dateDisplay = ticket.created_at ? new Date(ticket.created_at).toLocaleDateString('en-IN') : 'Just now';
+
+              return (
+                <div key={ticket.id} className="bg-white p-6 rounded-2xl shadow-md border-l-4 border-l-red-500 flex flex-col gap-3">
+                  <div className="flex justify-between items-start">
+                    <span className="bg-red-100 text-red-700 text-xs font-extrabold px-3 py-1 rounded-full uppercase tracking-wider">
+                      {ticket.issue_type}
+                    </span>
+                    <span className="text-xs font-bold text-gray-400">
+                      {dateDisplay}
+                    </span>
+                  </div>
+                  
+                  <p className="text-gray-800 font-medium text-sm bg-gray-50 p-3 rounded-lg border border-gray-100">
+                    "{ticket.description}"
+                  </p>
+
+                  <div className="flex justify-between items-end mt-2">
+                    <div>
+                      <p className="font-bold text-gray-900">{studentName}</p>
+                      <p className="text-xs text-indigo-600 font-bold">Room {roomNum} • Bed {bedNum}</p>
+                      <p className="text-xs text-gray-500 mt-1">📞 {phone}</p>
+                    </div>
+                    
+                    <form action={resolveTicket}>
+                      <input type="hidden" name="ticket_id" value={ticket.id} />
+                      <button type="submit" className="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg text-sm shadow-sm flex items-center gap-1">
+                        <span>✓</span> Mark Resolved
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              );
+            })}
+
+            {openTickets.length === 0 && (
+              <div className="bg-white p-10 rounded-2xl border border-dashed border-gray-300 text-center">
+                <p className="text-gray-500 font-medium mt-3">No active issues!</p>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* TICKET LEDGER TABLE */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-          <div className="p-6 border-b border-gray-100">
-            <h3 className="text-xl font-bold text-gray-800">Active Complaints</h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse">
-              <thead>
-                <tr className="bg-gray-50 text-gray-500 text-sm uppercase tracking-wider">
-                  <th className="p-4 font-semibold">Ticket ID</th>
-                  <th className="p-4 font-semibold">Room & Student</th>
-                  <th className="p-4 font-semibold">Issue Details</th>
-                  <th className="p-4 font-semibold">Status</th>
-                  <th className="p-4 font-semibold">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-100">
-                {tickets?.map((ticket: any) => (
-                  <tr key={ticket.id} className={`hover:bg-gray-50 ${ticket.status === 'Resolved' ? 'opacity-50' : ''}`}>
-                    
-                    <td className="p-4 text-gray-500 font-mono text-sm">
-                      #TKT-{ticket.id.toString().padStart(3, '0')}
-                    </td>
-                    
-                    <td className="p-4">
-                      <span className="font-bold text-gray-800 bg-gray-100 px-2 py-1 rounded text-xs mr-2">
-                        Room {ticket.students?.beds?.rooms?.room_number}
-                      </span>
-                      <span className="font-medium text-gray-700">{ticket.students?.users?.name}</span>
-                    </td>
-                    
-                    <td className="p-4">
-                      <p className="font-bold text-gray-800 text-sm">{ticket.issue_type}</p>
-                      <p className="text-gray-500 text-sm mt-1 max-w-xs truncate">{ticket.description}</p>
-                    </td>
-                    
-                    <td className="p-4">
-                      <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-                        ticket.status === 'Resolved' ? 'bg-green-100 text-green-700' :
-                        ticket.status === 'In Progress' ? 'bg-blue-100 text-blue-700' :
-                        'bg-orange-100 text-orange-700'
-                      }`}>
-                        {ticket.status}
-                      </span>
-                    </td>
-                    
-                    <td className="p-4">
-                      {/* RESOLVE BUTTON */}
-                      {ticket.status !== 'Resolved' && (
-                        <form action={resolveTicket}>
-                          <input type="hidden" name="ticket_id" value={ticket.id} />
-                          <button type="submit" className="text-sm bg-green-50 text-green-700 font-bold py-2 px-3 rounded hover:bg-green-100 flex items-center gap-1">
-                            ✓ Mark Resolved
-                          </button>
-                        </form>
-                      )}
-                    </td>
+        {/* RIGHT COLUMN: RESOLVED TICKETS */}
+        <div>
+          <h3 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">✅ Resolution History</h3>
+          <div className="flex flex-col gap-4">
+            {resolvedTickets.map((ticket: any) => {
+               const dateDisplay = ticket.created_at ? new Date(ticket.created_at).toLocaleDateString('en-IN') : 'Resolved';
 
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+               return (
+                <div key={ticket.id} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100 opacity-75">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm font-bold text-gray-800">{ticket.issue_type}</span>
+                    <span className="bg-green-100 text-green-700 text-[10px] font-extrabold px-2 py-1 rounded uppercase">Resolved</span>
+                  </div>
+                  <p className="text-gray-600 text-xs line-clamp-2 italic mb-3">"{ticket.description}"</p>
+                  
+                  <div className="flex justify-between items-center border-t border-gray-50 pt-3">
+                    <p className="text-xs text-gray-400 font-medium">Logged: {dateDisplay}</p>
+                    <form action={deleteTicket}>
+                      <input type="hidden" name="ticket_id" value={ticket.id} />
+                      <button type="submit" className="text-gray-400 hover:text-red-500 text-xs font-bold">Delete</button>
+                    </form>
+                  </div>
+                </div>
+               );
+            })}
           </div>
         </div>
 
-      </main>
-    </div>
+      </div>
+    </main>
   );
 }
