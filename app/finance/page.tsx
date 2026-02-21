@@ -144,7 +144,7 @@ export default async function FinancePage() {
                     </span>
                   </td>
                   <td className="p-5 text-right">
-                    {invoice.status === 'Pending' ? (
+                   {invoice.status === 'Pending' ? (
                       <form action={markAsPaid}>
                         <input type="hidden" name="invoice_id" value={invoice.id} />
                         <button type="submit" className="text-xs bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition-colors shadow-sm">
@@ -152,7 +152,9 @@ export default async function FinancePage() {
                         </button>
                       </form>
                     ) : (
-                      <span className="text-gray-300 font-bold italic text-xs px-4">Settled</span>
+                      <a href={`/finance/receipt/${invoice.id}`} target="_blank" className="text-xs bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-bold py-2 px-4 rounded-lg transition-colors border border-indigo-200 inline-block">
+                        📄 Receipt
+                      </a>
                     )}
                   </td>
                 </tr>
