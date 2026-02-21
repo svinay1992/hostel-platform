@@ -79,17 +79,25 @@ export default async function FinancePage() {
 
   return (
     <main className="flex-1 p-10 overflow-y-auto bg-gray-50 h-full font-sans">
-      <header className="mb-10 flex justify-between items-end">
+     <header className="mb-10 flex justify-between items-end">
         <div>
           <h2 className="text-3xl font-extrabold text-gray-800 tracking-tight">💰 Finance & Billing</h2>
           <p className="text-gray-500 mt-1">Manage student invoices and track revenue.</p>
         </div>
         
-        <form action={generateMonthlyRent}>
-          <button type="submit" className="bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-indigo-700 transition-colors shadow-md flex items-center gap-2">
-            <span className="text-xl">⚡</span> Auto-Bill All Students
-          </button>
-        </form>
+        <div className="flex gap-4">
+          {/* THE NEW EXPORT BUTTON */}
+          <a href="/api/export" className="bg-green-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-green-700 transition-colors shadow-md flex items-center gap-2">
+            <span className="text-xl">📊</span> Export to Excel
+          </a>
+
+          {/* THE EXISTING MAGIC BUTTON */}
+          <form action={generateMonthlyRent}>
+            <button type="submit" className="bg-indigo-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-indigo-700 transition-colors shadow-md flex items-center gap-2">
+              <span className="text-xl">⚡</span> Auto-Bill All Students
+            </button>
+          </form>
+        </div>
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">

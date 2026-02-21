@@ -45,6 +45,7 @@ export default function RootLayout({
           <a href="/announcements" className="text-gray-600 hover:bg-gray-100 px-4 py-3 rounded-lg font-medium transition-colors">📢 Announcements</a>
           <a href="/expenses" className="text-gray-600 hover:bg-gray-100 px-4 py-3 rounded-lg font-medium transition-colors">📉 Expenses</a>
           <a href="/inventory" className="text-gray-600 hover:bg-gray-100 px-4 py-3 rounded-lg font-medium transition-colors">📦 Inventory</a>
+          <a href="/staff" className="text-gray-600 hover:bg-gray-100 px-4 py-3 rounded-lg font-medium transition-colors">👨‍🍳 Staff</a>
           </nav>
 
           {/* THE NEW LOGOUT BUTTON */}
