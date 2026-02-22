@@ -1,21 +1,18 @@
-import { supabase } from '../../../../lib/supabase';
+import { supabase } from '../../../../lib/supabase'; // Adjust path if needed
 import Link from 'next/link';
 
 export default async function ReceiptPage({ params }: { params: Promise<{ id: string }> }) {
   
-  // Await the params to get the invoice ID safely
   const resolvedParams = await params;
   const invoiceId = resolvedParams.id;
 
-  // Fetch the specific invoice and all related student/room data
+  // 1. FETCH DATA (Now looking at the new student_admissions table)
   const { data: invoice } = await supabase
     .from('invoices')
     .select(`
       *,
-      students (
-        phone_number,
-        users (name, email),
-        beds (bed_number, rooms(room_number))
+      student_admissions (
+        full_name, email, phone, room_number, bed_number
       )
     `)
     .eq('id', invoiceId)
@@ -30,18 +27,16 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
     );
   }
 
-  // Safely extract nested data
-  const studentData: any = invoice.students;
-  const userData: any = studentData?.users;
-  const bedData: any = studentData?.beds;
-  const roomData: any = bedData?.rooms || bedData?.[0]?.rooms;
+  // 2. EXTRACT DATA SAFELY (No more confusing nested arrays!)
+  const studentData: any = invoice.student_admissions;
+  
+  const studentName = studentData?.full_name || 'Unknown Student';
+  const email = studentData?.email || 'N/A';
+  const phone = studentData?.phone || 'N/A';
+  const roomNumber = studentData?.room_number || 'N/A';
+  const bedNumber = studentData?.bed_number || 'N/A';
 
-  const studentName = userData?.name || userData?.[0]?.name || 'Unknown Student';
-  const email = userData?.email || userData?.[0]?.email || 'N/A';
-  const phone = studentData?.phone_number || 'N/A';
-  const roomNumber = roomData?.room_number || roomData?.[0]?.room_number || 'N/A';
-  const bedNumber = bedData?.bed_number || bedData?.[0]?.bed_number || 'N/A';
-
+  // 3. YOUR EXACT ORIGINAL UI LAYOUT
   return (
     <div className="min-h-screen bg-gray-200 p-8 flex justify-center font-sans">
       
@@ -49,17 +44,17 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
       <div className="bg-white w-full max-w-2xl shadow-2xl p-12 border border-gray-300 relative">
         
         {/* Print Button (Hidden when actually printing) */}
-        <div className="absolute top-4 right-4 print:hidden">
-          <Link href="/finance" className="text-gray-500 hover:text-gray-800 text-sm font-bold mr-4 transition-colors">
+        <div className="absolute top-4 right-4 print:hidden flex items-center gap-4">
+          <Link href="/finance" className="text-gray-500 hover:text-gray-800 text-sm font-bold transition-colors">
             &larr; Back
           </Link>
-          {/* We use a simple bit of inline JS to trigger the browser's print window */}
-          <button 
-            type="button" 
-            className="bg-indigo-600 text-white px-4 py-2 rounded shadow hover:bg-indigo-700 font-bold text-sm transition-colors"
+          {/* SAFE PRINT TRICK: Styled exactly like your button but works in Server Components */}
+          <a 
+            href="javascript:window.print()"
+            className="bg-indigo-600 text-white px-4 py-2 rounded shadow hover:bg-indigo-700 font-bold text-sm transition-colors cursor-pointer inline-block"
           >
             🖨️ Print / Save PDF
-          </button>
+          </a>
         </div>
 
         {/* Receipt Header */}
@@ -123,7 +118,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ id: st
 
       </div>
 
-      {/* A tiny bit of CSS to hide the print button and format the page when actually printing */}
+      {/* CSS to format the page when actually printing */}
       <style dangerouslySetInnerHTML={{__html: `
         @media print {
           body { background-color: white; }

@@ -1,65 +1,53 @@
-import { redirect } from 'next/navigation';
-import { cookies } from 'next/headers';
-import { supabase } from '../../lib/supabase';
+export const dynamic = 'force-dynamic';
 
-export default async function StudentLoginPage() {
-  
-  async function handleStudentLogin(formData: FormData) {
-    'use server'; 
-    const email = formData.get('email') as string;
-    const phone = formData.get('phone') as string;
+import { loginStudent } from './actions';
 
-    // 1. Find the user by their email
-    const { data: userData } = await supabase.from('users').select('id').eq('email', email).single();
-
-    if (userData) {
-      // 2. Verify they are a student by matching their phone number
-      const { data: studentData } = await supabase
-        .from('students')
-        .select('id')
-        .eq('user_id', userData.id)
-        .eq('phone_number', phone)
-        .single();
-
-      if (studentData) {
-        // SUCCESS! Issue a secure digital student badge with their specific ID
-        const cookieStore = await cookies();
-        cookieStore.set('hmp_student_token', studentData.id.toString(), { 
-          httpOnly: true, 
-          secure: true,
-          maxAge: 60 * 60 * 24 * 7 // Badge stays active for 1 week!
-        });
-        
-        redirect('/portal'); 
-      }
-    }
-    
-    // If details are wrong, refresh with an error
-    redirect('/portal-login?error=true');
-  }
+export default async function PortalLogin({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+  const resolvedParams = await searchParams;
+  const errorMessage = resolvedParams?.error;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-indigo-50 font-sans">
-      <div className="bg-white p-10 rounded-2xl shadow-xl max-w-md w-full border border-gray-200">
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-orange-100 mb-4">
-            <span className="text-2xl">🎓</span>
-          </div>
-          <h1 className="text-3xl font-extrabold text-indigo-600 tracking-tight">Student Portal</h1>
-          <p className="text-gray-500 mt-2 font-medium">Log in with your registered details</p>
-        </div>
+    <div className="fixed top-0 left-0 w-[100vw] h-[100vh] z-[9999] bg-[#F4F7FF] flex items-center justify-center font-sans p-4 overflow-y-auto m-0">
+      <div className="absolute top-0 left-0 w-full h-full overflow-hidden -z-10 pointer-events-none">
+        <div className="absolute -top-10 left-[-10%] w-96 h-96 bg-indigo-200/30 rounded-full blur-3xl mix-blend-multiply opacity-70"></div>
+        <div className="absolute bottom-10 right-[-5%] w-80 h-80 bg-blue-200/30 rounded-full blur-3xl mix-blend-multiply opacity-70"></div>
+      </div>
 
-        <form action={handleStudentLogin} className="flex flex-col gap-5">
-          <div>
-            <label className="block text-sm font-bold text-gray-700 mb-1">Registered Email</label>
-            <input type="email" name="email" required placeholder="rohan@example.com" className="w-full border border-gray-300 rounded-lg px-4 py-3 text-gray-800 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
+      <div className="w-full max-w-md bg-white rounded-2xl shadow-xl shadow-indigo-100/50 p-10 border border-slate-100 relative z-10">
+        <h1 className="text-2xl font-black text-indigo-700 tracking-tight text-center mb-1">Student Portal</h1>
+        <p className="text-sm font-medium text-slate-500 text-center mb-8">Log in with your registered details</p>
+
+        {errorMessage && (
+          <div className="mb-6 p-3 bg-rose-50 border border-rose-200 text-rose-600 rounded-lg text-sm font-bold text-center">
+            {errorMessage}
           </div>
+        )}
+
+        <form action={loginStudent} className="flex flex-col gap-5">
           <div>
-            <label className="block text-sm font-bold text-gray-700 mb-1">Phone Number (Password)</label>
-            <input type="text" name="phone" required placeholder="9876543210" className="w-full border border-gray-300 rounded-lg px-4 py-3 text-gray-800 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" />
+            <label className="block text-xs font-bold text-slate-600 mb-2">Registered Email</label>
+            <input
+              type="email"
+              name="email"
+              required
+              placeholder="student@example.com"
+              className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3.5 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+            />
           </div>
-          <button type="submit" className="w-full bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg hover:bg-indigo-700 transition-colors shadow-sm mt-4">
-            Access My Portal
+
+          <div>
+            <label className="block text-xs font-bold text-slate-600 mb-2">Mobile Number (Password)</label>
+            <input
+              type="password"
+              name="password"
+              required
+              placeholder="9876543210"
+              className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3.5 text-sm text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all tracking-widest"
+            />
+          </div>
+
+          <button type="submit" className="w-full bg-[#4F46E5] hover:bg-indigo-700 text-white font-bold text-sm py-4 rounded-lg transition-transform hover:-translate-y-0.5 shadow-md mt-2">
+            Secure Login
           </button>
         </form>
       </div>
