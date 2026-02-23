@@ -111,6 +111,39 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
       if (studentError) {
         console.error("❌ INSERT ERROR:", studentError.message);
       } else {
+        // Keep legacy `students` table in sync for modules using student_id FK (e.g. complaints)
+        const { data: legacyStudent } = await supabase
+          .from('students')
+          .select('id')
+          .eq('user_id', targetUserId)
+          .maybeSingle();
+
+        if (!legacyStudent?.id) {
+          const { error: legacyInsertError } = await supabase.from('students').insert([{
+            user_id: targetUserId,
+            phone_number: phone || null,
+            bed_id: bed_id || null,
+            security_deposit: security_deposit || 0,
+            advance_rent: advance_rent || 0,
+          }]);
+          if (legacyInsertError) {
+            console.error("❌ LEGACY STUDENT SYNC ERROR:", legacyInsertError.message);
+          }
+        } else {
+          const { error: legacyUpdateError } = await supabase
+            .from('students')
+            .update({
+              phone_number: phone || null,
+              bed_id: bed_id || null,
+              security_deposit: security_deposit || 0,
+              advance_rent: advance_rent || 0,
+            })
+            .eq('id', legacyStudent.id);
+          if (legacyUpdateError) {
+            console.error("❌ LEGACY STUDENT UPDATE ERROR:", legacyUpdateError.message);
+          }
+        }
+
         // Mark bed as occupied
         if (bed_id) {
           await supabase.from('beds').update({ is_occupied: true }).eq('id', bed_id);

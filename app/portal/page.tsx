@@ -5,6 +5,7 @@ import { supabase } from '../../lib/supabase';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache'; // <-- Added for the complaint form to refresh the page
+import AutoRefresh from '../_components/auto-refresh';
 
 export default async function StudentPortalDashboard() {
   
@@ -53,6 +54,13 @@ export default async function StudentPortalDashboard() {
     .eq('day_of_week', todayMenuDay)
     .single();
 
+  // Fetch latest announcements published by admin
+  const { data: notices } = await supabase
+    .from('notices')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(5);
+
   // ==========================================
   // ACTIONS
   // ==========================================
@@ -70,20 +78,136 @@ export default async function StudentPortalDashboard() {
     'use server';
     const issueType = formData.get('issue_type') as string;
     const description = formData.get('description') as string;
+    const normalizedStudentId = Number(studentId);
 
-    await supabase.from('complaints').insert([{
-      student_id: studentId,
+    if (!Number.isFinite(normalizedStudentId)) {
+      console.error('Invalid student ID for complaint insert:', studentId);
+      return;
+    }
+
+    // complaints.student_id points to legacy `students.id`.
+    // Resolve (or create) that row from the logged-in admission profile.
+    const { data: portalUser } = await supabase
+      .from('users')
+      .select('id')
+      .eq('email', student.email)
+      .single();
+
+    if (!portalUser?.id) {
+      console.error('No linked user found for portal complaint:', student.email);
+      return;
+    }
+
+    let legacyStudentId: number | null = null;
+
+    const { data: existingLegacyStudent } = await supabase
+      .from('students')
+      .select('id')
+      .eq('user_id', portalUser.id)
+      .maybeSingle();
+
+    if (existingLegacyStudent?.id) {
+      legacyStudentId = existingLegacyStudent.id;
+    } else {
+      const guessDefaultForColumn = (column: string) => {
+        const col = column.toLowerCase();
+        if (col === 'user_id') return portalUser.id;
+        if (col.includes('phone')) return student.phone || '0000000000';
+        if (col.includes('email')) return student.email || 'unknown@example.com';
+        if (col.includes('name')) return student.full_name || 'Student';
+        if (col.includes('status')) return 'ACTIVE';
+        if (col.includes('date')) return new Date().toISOString().slice(0, 10);
+        if (
+          col.includes('deposit') ||
+          col.includes('rent') ||
+          col.includes('amount') ||
+          col.includes('fee') ||
+          col.includes('paid') ||
+          col.includes('due') ||
+          col.includes('balance')
+        ) {
+          return 0;
+        }
+        if (col.endsWith('_id') || col === 'id') return null;
+        return '';
+      };
+
+      const legacyCreatePayload: Record<string, any> = {
+        user_id: portalUser.id,
+        phone_number: student.phone || null,
+        bed_id: student.bed_id || null,
+        security_deposit: Number(student.security_deposit) || 0,
+      };
+
+      for (let attempt = 0; attempt < 8 && !legacyStudentId; attempt++) {
+        const { data: createdLegacyStudent, error: legacyCreateError } = await supabase
+          .from('students')
+          .insert([legacyCreatePayload])
+          .select('id')
+          .single();
+
+        if (!legacyCreateError && createdLegacyStudent?.id) {
+          legacyStudentId = createdLegacyStudent.id;
+          break;
+        }
+
+        const errorMessage = legacyCreateError?.message || '';
+        const missingColumnMatch = errorMessage.match(/null value in column "([^"]+)"/i);
+        const unknownColumnMatch =
+          errorMessage.match(/Could not find the '([^']+)' column/i) ||
+          errorMessage.match(/column "([^"]+)" does not exist/i);
+        const missingColumn = missingColumnMatch?.[1];
+        const unknownColumn = unknownColumnMatch?.[1];
+
+        if (unknownColumn) {
+          if (unknownColumn in legacyCreatePayload) {
+            delete legacyCreatePayload[unknownColumn];
+            continue;
+          }
+          console.error('Legacy student creation failed:', errorMessage || 'Unknown error');
+          break;
+        }
+
+        if (!missingColumn) {
+          console.error('Legacy student creation failed:', errorMessage || 'Unknown error');
+          break;
+        }
+
+        if (missingColumn in legacyCreatePayload) {
+          console.error('Legacy student creation failed:', errorMessage || 'Unknown error');
+          break;
+        }
+
+        legacyCreatePayload[missingColumn] = guessDefaultForColumn(missingColumn);
+      }
+
+      if (!legacyStudentId) {
+        console.error('Legacy student creation failed: unable to satisfy required columns');
+        return;
+      }
+    }
+
+    const { error } = await supabase.from('complaints').insert([{
+      student_id: legacyStudentId,
       issue_type: issueType,
-      description: description,
+      description: description?.trim(),
       status: 'Open'
     }]);
 
+    if (error) {
+      console.error('Complaint insert failed:', error.message);
+      return;
+    }
+
     revalidatePath('/portal');
+    revalidatePath('/helpdesk');
+    revalidatePath('/');
   }
 
   return (
     // FULL SCREEN OVERRIDE: Covers the entire browser window to hide the Admin Sidebar
     <div className="fixed top-0 left-0 w-[100vw] h-[100vh] z-[9999] bg-[#F8FAFC] font-sans flex flex-col overflow-y-auto m-0">
+      <AutoRefresh intervalMs={4000} />
       
       {/* Background Elements */}
       <div className="absolute top-0 left-0 w-full h-96 overflow-hidden -z-10 pointer-events-none">
@@ -249,6 +373,39 @@ export default async function StudentPortalDashboard() {
                   <p className="text-xs font-black text-indigo-500 uppercase tracking-widest mb-3">Dinner</p>
                   <p className="text-sm font-bold text-slate-800 relative z-10">{todaysMenu?.dinner || 'Menu not updated'}</p>
                 </div>
+              </div>
+            </div>
+
+            {/* ADMIN ANNOUNCEMENTS */}
+            <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+              <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-lg font-black text-slate-800">Announcements</h3>
+              </div>
+              <div className="p-6 flex flex-col gap-4">
+                {notices?.map((notice: any) => (
+                  <div
+                    key={notice.id}
+                    className={`rounded-2xl border p-4 ${
+                      notice.is_urgent ? 'border-rose-200 bg-rose-50/50' : 'border-indigo-100 bg-indigo-50/40'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-2">
+                      <p className="text-sm font-black text-slate-800">{notice.title}</p>
+                      {notice.is_urgent && (
+                        <span className="text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-600 px-2 py-1 rounded-md">
+                          Urgent
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-600 whitespace-pre-wrap">{notice.message}</p>
+                    <p className="text-xs text-slate-400 mt-3">
+                      {notice.created_at ? new Date(notice.created_at).toLocaleString('en-IN') : ''}
+                    </p>
+                  </div>
+                ))}
+                {(!notices || notices.length === 0) && (
+                  <p className="text-sm text-slate-400 italic">No announcements yet.</p>
+                )}
               </div>
             </div>
 

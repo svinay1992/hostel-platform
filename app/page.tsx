@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { supabase } from '../lib/supabase';
 import Link from 'next/link';
+import AutoRefresh from './_components/auto-refresh';
 
 export default async function MasterDashboard() {
   
@@ -19,7 +20,10 @@ export default async function MasterDashboard() {
   const occupancyRate = totalBeds ? Math.round(((occupiedBeds || 0) / totalBeds) * 100) : 0;
 
   // 2. FETCH HELPDESK STATS
-  const { count: openComplaints } = await supabase.from('complaints').select('*', { count: 'exact', head: true }).eq('status', 'Open');
+  const { count: openComplaints } = await supabase
+    .from('complaints')
+    .select('*', { count: 'exact', head: true })
+    .in('status', ['Open', 'open', 'OPEN']);
 
   // 3. FETCH FINANCIAL STATS (Income)
   const { data: paidInvoices } = await supabase.from('invoices').select('amount').eq('status', 'Paid');
@@ -41,6 +45,7 @@ export default async function MasterDashboard() {
 
   return (
     <main className="flex-1 p-8 lg:p-12 overflow-y-auto bg-[#F8FAFC] h-full font-sans relative">
+      <AutoRefresh intervalMs={4000} />
       
       {/* Background Decor */}
       <div className="absolute top-0 left-0 w-full h-96 overflow-hidden -z-10 pointer-events-none">
