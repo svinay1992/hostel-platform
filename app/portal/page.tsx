@@ -4,7 +4,7 @@ export const dynamic = 'force-dynamic';
 import { supabase } from '../../lib/supabase';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { revalidatePath } from 'next/cache'; // <-- Added for the complaint form to refresh the page
+import { revalidatePath } from 'next/cache';
 import AutoRefresh from '../_components/auto-refresh';
 
 export default async function StudentPortalDashboard() {
@@ -13,14 +13,13 @@ export default async function StudentPortalDashboard() {
   const cookieStore = await cookies();
   const studentIdString = cookieStore.get('hmp_student_token')?.value;
 
-  // If no cookie, force them back to login
   if (!studentIdString) {
     redirect('/portal-login');
   }
 
   const studentId = studentIdString;
 
-  // 2. Fetch the logged-in student's full profile
+  // 2. Fetch student profile
   const { data: student } = await supabase
     .from('student_admissions')
     .select('*')
@@ -28,23 +27,17 @@ export default async function StudentPortalDashboard() {
     .eq('status', 'ACTIVE')
     .single();
 
-  // If student is somehow deleted, force logout
   if (!student) {
     redirect('/portal-login');
   }
 
-  // ==========================================
-  // ADDED: FETCH INVOICES & MESS MENU
-  // ==========================================
-  
-  // Fetch Student Invoices
+  // Data Fetching
   const { data: myInvoices } = await supabase
     .from('invoices')
     .select('*')
     .eq('student_id', studentId)
     .order('due_date', { ascending: false });
 
-  // Fetch Today's Mess Menu dynamically
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const todayMenuDay = days[new Date().getDay()]; 
   
@@ -54,18 +47,13 @@ export default async function StudentPortalDashboard() {
     .eq('day_of_week', todayMenuDay)
     .single();
 
-  // Fetch latest announcements published by admin
   const { data: notices } = await supabase
     .from('notices')
     .select('*')
     .order('created_at', { ascending: false })
     .limit(5);
 
-  // ==========================================
-  // ACTIONS
-  // ==========================================
-
-  // SERVER ACTION: Handle Logout inline
+  // Actions
   async function handleLogout() {
     'use server';
     const cookieStore = await cookies();
@@ -73,33 +61,20 @@ export default async function StudentPortalDashboard() {
     redirect('/portal-login');
   }
 
-  // ADDED SERVER ACTION: Submit a Maintenance Complaint
   async function submitComplaint(formData: FormData) {
     'use server';
     const issueType = formData.get('issue_type') as string;
     const description = formData.get('description') as string;
-    const normalizedStudentId = Number(studentId);
-
-    if (!Number.isFinite(normalizedStudentId)) {
-      console.error('Invalid student ID for complaint insert:', studentId);
-      return;
-    }
-
-    // complaints.student_id points to legacy `students.id`.
-    // Resolve (or create) that row from the logged-in admission profile.
+    
     const { data: portalUser } = await supabase
       .from('users')
       .select('id')
       .eq('email', student.email)
       .single();
 
-    if (!portalUser?.id) {
-      console.error('No linked user found for portal complaint:', student.email);
-      return;
-    }
+    if (!portalUser?.id) return;
 
     let legacyStudentId: number | null = null;
-
     const { data: existingLegacyStudent } = await supabase
       .from('students')
       .select('id')
@@ -108,350 +83,251 @@ export default async function StudentPortalDashboard() {
 
     if (existingLegacyStudent?.id) {
       legacyStudentId = existingLegacyStudent.id;
-    } else {
-      const guessDefaultForColumn = (column: string) => {
-        const col = column.toLowerCase();
-        if (col === 'user_id') return portalUser.id;
-        if (col.includes('phone')) return student.phone || '0000000000';
-        if (col.includes('email')) return student.email || 'unknown@example.com';
-        if (col.includes('name')) return student.full_name || 'Student';
-        if (col.includes('status')) return 'ACTIVE';
-        if (col.includes('date')) return new Date().toISOString().slice(0, 10);
-        if (
-          col.includes('deposit') ||
-          col.includes('rent') ||
-          col.includes('amount') ||
-          col.includes('fee') ||
-          col.includes('paid') ||
-          col.includes('due') ||
-          col.includes('balance')
-        ) {
-          return 0;
-        }
-        if (col.endsWith('_id') || col === 'id') return null;
-        return '';
-      };
-
-      const legacyCreatePayload: Record<string, any> = {
-        user_id: portalUser.id,
-        phone_number: student.phone || null,
-        bed_id: student.bed_id || null,
-        security_deposit: Number(student.security_deposit) || 0,
-      };
-
-      for (let attempt = 0; attempt < 8 && !legacyStudentId; attempt++) {
-        const { data: createdLegacyStudent, error: legacyCreateError } = await supabase
-          .from('students')
-          .insert([legacyCreatePayload])
-          .select('id')
-          .single();
-
-        if (!legacyCreateError && createdLegacyStudent?.id) {
-          legacyStudentId = createdLegacyStudent.id;
-          break;
-        }
-
-        const errorMessage = legacyCreateError?.message || '';
-        const missingColumnMatch = errorMessage.match(/null value in column "([^"]+)"/i);
-        const unknownColumnMatch =
-          errorMessage.match(/Could not find the '([^']+)' column/i) ||
-          errorMessage.match(/column "([^"]+)" does not exist/i);
-        const missingColumn = missingColumnMatch?.[1];
-        const unknownColumn = unknownColumnMatch?.[1];
-
-        if (unknownColumn) {
-          if (unknownColumn in legacyCreatePayload) {
-            delete legacyCreatePayload[unknownColumn];
-            continue;
-          }
-          console.error('Legacy student creation failed:', errorMessage || 'Unknown error');
-          break;
-        }
-
-        if (!missingColumn) {
-          console.error('Legacy student creation failed:', errorMessage || 'Unknown error');
-          break;
-        }
-
-        if (missingColumn in legacyCreatePayload) {
-          console.error('Legacy student creation failed:', errorMessage || 'Unknown error');
-          break;
-        }
-
-        legacyCreatePayload[missingColumn] = guessDefaultForColumn(missingColumn);
-      }
-
-      if (!legacyStudentId) {
-        console.error('Legacy student creation failed: unable to satisfy required columns');
-        return;
-      }
     }
 
-    const { error } = await supabase.from('complaints').insert([{
-      student_id: legacyStudentId,
-      issue_type: issueType,
-      description: description?.trim(),
-      status: 'Open'
-    }]);
-
-    if (error) {
-      console.error('Complaint insert failed:', error.message);
-      return;
+    if (legacyStudentId) {
+      await supabase.from('complaints').insert([{
+        student_id: legacyStudentId,
+        issue_type: issueType,
+        description: description?.trim(),
+        status: 'Open'
+      }]);
     }
 
     revalidatePath('/portal');
-    revalidatePath('/helpdesk');
-    revalidatePath('/');
   }
 
   return (
-    // FULL SCREEN OVERRIDE: Covers the entire browser window to hide the Admin Sidebar
-    <div className="fixed top-0 left-0 w-[100vw] h-[100vh] z-[9999] bg-[#F8FAFC] font-sans flex flex-col overflow-y-auto m-0">
+    <div className="fixed top-0 left-0 w-full h-full z-[9999] bg-[#F1F5F9] font-sans flex flex-col overflow-y-auto m-0 text-slate-900">
       <AutoRefresh intervalMs={4000} />
       
-      {/* Background Elements */}
-      <div className="absolute top-0 left-0 w-full h-96 overflow-hidden -z-10 pointer-events-none">
-        <div className="absolute -top-24 -left-24 w-96 h-96 bg-indigo-200/40 rounded-full blur-3xl mix-blend-multiply opacity-70"></div>
-        <div className="absolute top-10 right-20 w-80 h-80 bg-emerald-200/40 rounded-full blur-3xl mix-blend-multiply opacity-70"></div>
-      </div>
+      {/* Subtle modern background gradient */}
+      <div className="fixed inset-0 -z-10 bg-[radial-gradient(45%_40%_at_50%_50%,rgba(99,102,241,0.05)_0%,transparent_100%)]"></div>
 
-      {/* TOP NAVIGATION BAR */}
-      <nav className="w-full bg-white/80 backdrop-blur-md border-b border-slate-200 p-4 px-8 flex justify-between items-center relative z-10 shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-indigo-600 text-white rounded-xl flex items-center justify-center text-xl shadow-md">🎓</div>
-          <div>
-            <h1 className="font-black text-slate-800 tracking-tight text-lg leading-tight">My Hostel</h1>
-            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest leading-tight">Student Portal</p>
+      {/* TOP NAVIGATION */}
+      <nav className="sticky top-0 w-full bg-white/90 backdrop-blur-xl border-b border-slate-200 z-50">
+        <div className="max-w-7xl mx-auto px-6 h-18 flex justify-between items-center">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-indigo-600 rounded-xl flex items-center justify-center shadow-lg shadow-indigo-200">
+              <span className="text-white text-xl">🏠</span>
+            </div>
+            <div>
+              <h1 className="font-bold text-slate-900 text-lg leading-none">Student Hub</h1>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Management Portal</p>
+            </div>
           </div>
-        </div>
-        
-        <div className="flex items-center gap-4">
-          <p className="text-sm font-bold text-slate-700 hidden md:block">Hello, {student.full_name.split(' ')[0]} 👋</p>
-          <form action={handleLogout}>
-            <button type="submit" className="bg-rose-50 hover:bg-rose-100 text-rose-600 font-bold text-xs uppercase tracking-wider px-4 py-2 rounded-lg transition-colors border border-rose-100">
-              Log Out
-            </button>
-          </form>
+          
+          <div className="flex items-center gap-6">
+            <div className="hidden sm:block text-right">
+              <p className="text-sm font-bold text-slate-700">{student.full_name}</p>
+              <p className="text-[10px] font-medium text-emerald-600 uppercase">● Resident Active</p>
+            </div>
+            <form action={handleLogout}>
+              <button type="submit" className="group flex items-center gap-2 bg-slate-100 hover:bg-rose-50 text-slate-600 hover:text-rose-600 font-bold text-xs uppercase px-4 py-2.5 rounded-full transition-all border border-slate-200 hover:border-rose-100">
+                <span>Sign Out</span>
+                <span className="group-hover:translate-x-0.5 transition-transform">→</span>
+              </button>
+            </form>
+          </div>
         </div>
       </nav>
 
-      {/* MAIN DASHBOARD CONTENT */}
-      <main className="flex-1 p-8 lg:p-12 max-w-6xl mx-auto w-full relative z-10">
+      <main className="flex-1 p-6 lg:p-10 max-w-7xl mx-auto w-full">
         
-        <header className="mb-10">
-          <h2 className="text-3xl font-black text-slate-800 tracking-tight">Welcome back, {student.full_name}!</h2>
-          <p className="text-slate-500 mt-2 font-medium">Here is your current hostel status and information.</p>
+        {/* HEADER SECTION */}
+        <header className="mb-10 flex flex-col md:flex-row md:items-end justify-between gap-4">
+          <div>
+            <h2 className="text-4xl font-extrabold text-slate-900 tracking-tight">Dashboard</h2>
+            <p className="text-slate-500 mt-1 font-medium italic">Welcome back to your residence overview.</p>
+          </div>
+          <div className="flex items-center gap-2 bg-white px-4 py-2 rounded-2xl shadow-sm border border-slate-100">
+            <span className="text-indigo-500">📅</span>
+            <span className="text-sm font-bold text-slate-600">{new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</span>
+          </div>
         </header>
 
-        {/* YOUR EXACT ROW 1: QUICK STATS */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+        {/* STATS GRID */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-10">
           
-          {/* CARD 1: MY ROOM */}
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 relative overflow-hidden flex flex-col justify-between">
-            <div className="absolute -right-4 -top-4 w-24 h-24 bg-indigo-50 rounded-full blur-2xl z-0"></div>
-            <div className="relative z-10 mb-6">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2">
-                <span>🛏️</span> Room Allocation
-              </h3>
-              <p className="text-3xl font-black text-indigo-600 mt-4">Room {student.room_number || 'TBA'}</p>
-              <p className="text-sm font-bold text-slate-600 mt-1">Bed {student.bed_number || 'TBA'}</p>
-            </div>
-            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-xs font-medium text-slate-500 text-center relative z-10">
-              Status: <span className="font-bold text-emerald-600">{student.status}</span>
-            </div>
+          {/* ROOM CARD */}
+          <div className="bg-white p-7 rounded-[2rem] shadow-sm border border-slate-200/60 hover:border-indigo-200 transition-colors relative overflow-hidden group">
+             <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                <span className="text-6xl italic font-black">01</span>
+             </div>
+             <p className="text-[10px] font-black text-indigo-500 uppercase tracking-[0.2em] mb-4">Current Residence</p>
+             <div className="flex items-baseline gap-2">
+                <h3 className="text-4xl font-black text-slate-900">Room {student.room_number || 'TBA'}</h3>
+                <span className="text-slate-400 font-bold text-sm">/ Bed {student.bed_number || 'N/A'}</span>
+             </div>
+             <div className="mt-6 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Allocated & Active</p>
+             </div>
           </div>
 
-          {/* CARD 2: MY INITIAL PAYMENTS */}
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 relative overflow-hidden flex flex-col justify-between">
-            <div className="absolute -right-4 -top-4 w-24 h-24 bg-emerald-50 rounded-full blur-2xl z-0"></div>
-            <div className="relative z-10 mb-6">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2">
-                <span>💰</span> Paid at Admission
-              </h3>
-              <p className="text-3xl font-black text-emerald-600 mt-4">₹{student.total_paid || 0}</p>
-              
-              <div className="mt-3 space-y-1">
-                <p className="text-xs font-medium text-slate-500 flex justify-between">
-                  <span>Security Deposit:</span> <strong className="text-slate-700">₹{student.security_deposit || 0}</strong>
-                </p>
-                <p className="text-xs font-medium text-slate-500 flex justify-between">
-                  <span>Advance Rent:</span> <strong className="text-slate-700">₹{student.advance_rent || 0}</strong>
-                </p>
-              </div>
-            </div>
+          {/* FINANCIAL SUMMARY */}
+          <div className="bg-white p-7 rounded-[2rem] shadow-sm border border-slate-200/60 hover:border-emerald-200 transition-colors group">
+             <p className="text-[10px] font-black text-emerald-600 uppercase tracking-[0.2em] mb-4">Total Paid (Admission)</p>
+             <h3 className="text-4xl font-black text-slate-900">₹{student.total_paid || 0}</h3>
+             <div className="mt-4 flex gap-4">
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Deposit: <span className="text-slate-700">₹{student.security_deposit}</span></div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Advance: <span className="text-slate-700">₹{student.advance_rent}</span></div>
+             </div>
           </div>
 
-          {/* CARD 3: MY PROFILE DETAILS */}
-          <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 relative overflow-hidden">
-            <div className="absolute -right-4 -top-4 w-24 h-24 bg-rose-50 rounded-full blur-2xl z-0"></div>
-            <div className="relative z-10 mb-4">
-              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-2">
-                <span>👤</span> Registered Details
-              </h3>
-            </div>
-            
-            <div className="space-y-4 relative z-10">
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Phone & Email</p>
-                <p className="text-sm font-bold text-slate-800">{student.phone}</p>
-                <p className="text-xs text-slate-500">{student.email}</p>
-              </div>
-              <div>
-                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Academics</p>
-                <p className="text-sm font-bold text-slate-800">{student.coaching_name || 'N/A'}</p>
-                <p className="text-xs text-slate-500">{student.course} • {student.timing || 'No timing set'}</p>
-              </div>
-              <div className="bg-rose-50 p-3 rounded-xl border border-rose-100">
-                <p className="text-[10px] font-bold text-rose-500 uppercase tracking-widest mb-1">Emergency SOS</p>
-                <p className="text-sm font-black text-rose-700">{student.parent_name}</p>
-                <p className="text-xs font-bold text-rose-600">{student.parent_phone}</p>
-              </div>
-            </div>
+          {/* PROFILE PREVIEW */}
+          <div className="bg-slate-900 p-7 rounded-[2rem] shadow-xl text-white relative overflow-hidden">
+             <div className="absolute -bottom-10 -right-10 w-32 h-32 bg-indigo-500/20 rounded-full blur-3xl"></div>
+             <p className="text-[10px] font-black text-indigo-400 uppercase tracking-[0.2em] mb-4">Verified Profile</p>
+             <p className="text-xl font-bold truncate">{student.full_name}</p>
+             <p className="text-xs text-slate-400 mt-1">{student.email}</p>
+             <div className="mt-6 pt-4 border-t border-slate-800">
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Academic Info</p>
+                <p className="text-xs font-medium mt-1 text-slate-300">{student.coaching_name || 'Personal Study'}</p>
+             </div>
           </div>
         </div>
 
-        {/* ========================================= */}
-        {/* ADDED: ROW 2 - INVOICES, MENU, HELPDESK */}
-        {/* ========================================= */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* MIDDLE SECTION: INVOICES & MENU */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mb-10">
           
-          {/* LEFT COLUMN: Rent & Food */}
-          <div className="lg:col-span-2 flex flex-col gap-6">
-            
-            {/* MY RENT INVOICES */}
-            <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50/50">
-                <h3 className="text-lg font-black text-slate-800">My Rent Invoices</h3>
+          {/* INVOICES - 8 COLS */}
+          <div className="lg:col-span-8 space-y-8">
+            <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm overflow-hidden">
+              <div className="px-8 py-6 border-b border-slate-100 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900">Payment History</h3>
+                <span className="text-xs font-bold text-slate-400">{myInvoices?.length || 0} Records</span>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-white text-slate-400 text-xs uppercase tracking-widest border-b border-slate-100">
-                    <tr>
-                      <th className="p-6">Amount</th>
-                      <th className="p-6">Due Date</th>
-                      <th className="p-6">Status</th>
+              <div className="p-2 overflow-x-auto">
+                <table className="w-full">
+                  <thead>
+                    <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                      <th className="px-6 py-4 text-left">Bill Details</th>
+                      <th className="px-6 py-4 text-left">Due Date</th>
+                      <th className="px-6 py-4 text-right">Status</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-50 text-sm bg-white">
-                    {myInvoices?.map((invoice: any) => (
-                      <tr key={invoice.id} className="hover:bg-slate-50 transition-colors">
-                        <td className="p-6 font-black text-slate-700 text-lg">₹{Number(invoice.amount).toLocaleString('en-IN')}</td>
-                        <td className="p-6 font-medium text-slate-500">{new Date(invoice.due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}</td>
-                        <td className="p-6">
-                          <span className={`px-3 py-1.5 rounded-lg text-[10px] uppercase tracking-wider font-black ${
-                            invoice.status === 'Paid' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                  <tbody className="divide-y divide-slate-50">
+                    {myInvoices?.map((inv: any) => (
+                      <tr key={inv.id} className="hover:bg-slate-50/50 transition-colors group">
+                        <td className="px-6 py-5">
+                          <p className="text-lg font-black text-slate-800">₹{Number(inv.amount).toLocaleString('en-IN')}</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Monthly Rent</p>
+                        </td>
+                        <td className="px-6 py-5">
+                          <p className="text-sm font-bold text-slate-600">
+                            {new Date(inv.due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
+                          </p>
+                        </td>
+                        <td className="px-6 py-5 text-right">
+                          <span className={`inline-flex px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest ${
+                            inv.status === 'Paid' ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'
                           }`}>
-                            {invoice.status}
+                            {inv.status}
                           </span>
                         </td>
                       </tr>
                     ))}
                     {(!myInvoices || myInvoices.length === 0) && (
-                      <tr><td colSpan={3} className="p-8 text-center text-slate-400 font-medium italic">No invoices generated yet.</td></tr>
+                      <tr><td colSpan={3} className="px-6 py-12 text-center text-slate-400 font-medium italic text-sm">No billing data found.</td></tr>
                     )}
                   </tbody>
                 </table>
               </div>
             </div>
 
-            {/* TODAY'S MESS MENU */}
-            <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
-              <div className="p-6 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
-                <h3 className="text-lg font-black text-slate-800">Today's Menu</h3>
-                <span className="bg-indigo-100 text-indigo-700 font-bold px-3 py-1 rounded-lg text-xs uppercase tracking-wider">{todayMenuDay}</span>
+            {/* MESS MENU */}
+            <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm overflow-hidden">
+              <div className="px-8 py-6 border-b border-slate-100 bg-slate-50/30 flex justify-between items-center">
+                <h3 className="text-xl font-black text-slate-900 flex items-center gap-2">🍲 Today's Menu</h3>
+                <div className="flex items-center gap-2 px-3 py-1 bg-white border border-slate-200 rounded-lg shadow-sm">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  <span className="text-[10px] font-black text-indigo-600 uppercase tracking-widest">{todayMenuDay}</span>
+                </div>
               </div>
-              <div className="p-6 grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
-                <div className="bg-amber-50 p-6 rounded-2xl border border-amber-100 shadow-sm relative overflow-hidden">
-                  <p className="text-xs font-black text-amber-500 uppercase tracking-widest mb-3">Breakfast</p>
-                  <p className="text-sm font-bold text-slate-800 relative z-10">{todaysMenu?.breakfast || 'Menu not updated'}</p>
-                </div>
-                <div className="bg-sky-50 p-6 rounded-2xl border border-sky-100 shadow-sm relative overflow-hidden">
-                  <p className="text-xs font-black text-sky-500 uppercase tracking-widest mb-3">Lunch</p>
-                  <p className="text-sm font-bold text-slate-800 relative z-10">{todaysMenu?.lunch || 'Menu not updated'}</p>
-                </div>
-                <div className="bg-indigo-50 p-6 rounded-2xl border border-indigo-100 shadow-sm relative overflow-hidden">
-                  <p className="text-xs font-black text-indigo-500 uppercase tracking-widest mb-3">Dinner</p>
-                  <p className="text-sm font-bold text-slate-800 relative z-10">{todaysMenu?.dinner || 'Menu not updated'}</p>
-                </div>
+              <div className="p-8 grid grid-cols-1 md:grid-cols-3 gap-6">
+                 {[
+                   { label: 'Breakfast', val: todaysMenu?.breakfast, color: 'amber' },
+                   { label: 'Lunch', val: todaysMenu?.lunch, color: 'sky' },
+                   { label: 'Dinner', val: todaysMenu?.dinner, color: 'indigo' }
+                 ].map((item) => (
+                   <div key={item.label} className="relative p-6 rounded-2xl bg-slate-50 border border-slate-100 group hover:border-indigo-100 transition-colors">
+                      <p className={`text-[10px] font-black text-${item.color}-500 uppercase tracking-widest mb-3`}>{item.label}</p>
+                      <p className="text-sm font-bold text-slate-700 leading-relaxed min-h-[3rem]">{item.val || 'Not Updated'}</p>
+                   </div>
+                 ))}
               </div>
             </div>
-
-            {/* ADMIN ANNOUNCEMENTS */}
-            <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
-              <div className="p-6 border-b border-slate-100 bg-slate-50/50">
-                <h3 className="text-lg font-black text-slate-800">Announcements</h3>
-              </div>
-              <div className="p-6 flex flex-col gap-4">
-                {notices?.map((notice: any) => (
-                  <div
-                    key={notice.id}
-                    className={`rounded-2xl border p-4 ${
-                      notice.is_urgent ? 'border-rose-200 bg-rose-50/50' : 'border-indigo-100 bg-indigo-50/40'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2 mb-2">
-                      <p className="text-sm font-black text-slate-800">{notice.title}</p>
-                      {notice.is_urgent && (
-                        <span className="text-[10px] font-black uppercase tracking-wider bg-rose-100 text-rose-600 px-2 py-1 rounded-md">
-                          Urgent
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-sm text-slate-600 whitespace-pre-wrap">{notice.message}</p>
-                    <p className="text-xs text-slate-400 mt-3">
-                      {notice.created_at ? new Date(notice.created_at).toLocaleString('en-IN') : ''}
-                    </p>
-                  </div>
-                ))}
-                {(!notices || notices.length === 0) && (
-                  <p className="text-sm text-slate-400 italic">No announcements yet.</p>
-                )}
-              </div>
-            </div>
-
           </div>
 
-          {/* RIGHT COLUMN: Helpdesk Form */}
-          <div className="lg:col-span-1">
-            <div className="bg-white rounded-3xl shadow-sm border border-slate-100 p-8 sticky top-28">
-              <div className="mb-6 border-b border-slate-100 pb-4">
-                <h3 className="text-xl font-black text-slate-800 flex items-center gap-2">🛠️ Report an Issue</h3>
-                <p className="text-xs text-slate-500 mt-2 font-medium leading-relaxed">Is something broken in your room? Submit a ticket and the admin will fix it.</p>
+          {/* SIDEBAR: COMPLAINTS & ANNOUNCEMENTS - 4 COLS */}
+          <div className="lg:col-span-4 space-y-8">
+            
+            {/* COMPLAINT FORM */}
+            <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-lg shadow-slate-200/40 p-8">
+              <div className="mb-8">
+                <h3 className="text-xl font-black text-slate-900">Helpdesk</h3>
+                <p className="text-xs text-slate-400 font-medium mt-1">Quickly report maintenance issues.</p>
               </div>
               
-              <form action={submitComplaint} className="flex flex-col gap-5">
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Issue Type</label>
-                  <select name="issue_type" required className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 bg-slate-50 outline-none">
-                    <option value="Electrical">⚡ Electrical (Fan, Light, AC)</option>
-                    <option value="Plumbing">🚰 Plumbing (Tap, Washroom)</option>
-                    <option value="Carpentry">🚪 Carpentry (Bed, Wardrobe)</option>
+              <form action={submitComplaint} className="space-y-5">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Issue Category</label>
+                  <select name="issue_type" required className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3.5 text-sm font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none transition-all">
+                    <option value="Electrical">⚡ Electrical</option>
+                    <option value="Plumbing">🚰 Plumbing</option>
+                    <option value="Carpentry">🚪 Carpentry</option>
                     <option value="Other">❓ Other</option>
                   </select>
                 </div>
                 
-                <div>
-                  <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Description</label>
-                  <textarea 
-                    name="description" 
-                    rows={5} 
-                    required 
-                    placeholder="Please describe the problem exactly..."
-                    className="w-full border border-slate-200 rounded-xl px-4 py-3 text-sm font-medium text-slate-700 focus:ring-2 focus:ring-indigo-500 resize-none bg-slate-50 outline-none placeholder-slate-400"
-                  ></textarea>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Describe Issue</label>
+                  <textarea name="description" rows={4} required placeholder="Example: Fan in Room 102 is making noise..." className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3.5 text-sm font-medium text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none transition-all resize-none"></textarea>
                 </div>
 
-                <button type="submit" className="w-full bg-indigo-600 text-white font-black uppercase tracking-wider text-xs py-4 rounded-xl hover:bg-indigo-700 transition-transform hover:-translate-y-1 shadow-lg shadow-indigo-200 mt-2">
-                  Submit Ticket
+                <button type="submit" className="w-full py-4 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600 transition-all shadow-xl shadow-slate-200 active:scale-[0.98]">
+                  Submit Support Ticket
                 </button>
               </form>
             </div>
+
+            {/* ANNOUNCEMENTS */}
+            <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm p-8">
+               <h3 className="text-lg font-black text-slate-900 mb-6">Recent Notices</h3>
+               <div className="space-y-5">
+                  {notices?.map((notice: any) => (
+                    <div key={notice.id} className={`group relative pl-4 border-l-2 ${notice.is_urgent ? 'border-rose-500' : 'border-indigo-500'}`}>
+                       <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${notice.is_urgent ? 'text-rose-500' : 'text-indigo-500'}`}>
+                         {notice.is_urgent ? 'Critical Notice' : 'Information'}
+                       </p>
+                       <p className="text-sm font-bold text-slate-800 leading-snug group-hover:text-indigo-600 transition-colors">{notice.title}</p>
+                       <p className="text-xs text-slate-400 mt-2">
+                         {new Date(notice.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                       </p>
+                    </div>
+                  ))}
+                  {(!notices || notices.length === 0) && (
+                    <p className="text-sm text-slate-400 italic">No announcements found.</p>
+                  )}
+               </div>
+            </div>
+
           </div>
-
         </div>
-
       </main>
 
+      {/* FOOTER */}
+      <footer className="w-full py-10 px-6 border-t border-slate-200 bg-white">
+        <div className="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
+          <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">© 2026 Hostel Management Platform</p>
+          <div className="flex gap-6">
+            <span className="text-xs font-bold text-slate-400 cursor-pointer hover:text-indigo-500 transition-colors uppercase tracking-widest">Support</span>
+            <span className="text-xs font-bold text-slate-400 cursor-pointer hover:text-indigo-500 transition-colors uppercase tracking-widest">Privacy</span>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
+// hello 
