@@ -14,7 +14,14 @@ export default async function MasterDashboard() {
     .eq('status', 'ACTIVE'); 
 
   const { count: totalBeds } = await supabase.from('beds').select('*', { count: 'exact', head: true });
-  const { count: occupiedBeds } = await supabase.from('beds').select('*', { count: 'exact', head: true }).eq('is_occupied', true);
+  const { data: activeBedAssignments } = await supabase
+    .from('student_admissions')
+    .select('bed_id')
+    .eq('status', 'ACTIVE')
+    .not('bed_id', 'is', null);
+  const occupiedBeds = new Set(
+    (activeBedAssignments || []).map((row: { bed_id: number | null }) => row.bed_id).filter((bedId): bedId is number => bedId !== null)
+  ).size;
   
   const availableBeds = (totalBeds || 0) - (occupiedBeds || 0);
   const occupancyRate = totalBeds ? Math.round(((occupiedBeds || 0) / totalBeds) * 100) : 0;

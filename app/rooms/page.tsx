@@ -3,8 +3,11 @@ export const dynamic = 'force-dynamic';
 
 import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
 
-export default async function RoomsPage() {
+export default async function RoomsPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+  const resolvedParams = await searchParams;
+  const roomDeleteBlocked = resolvedParams?.error === 'room_has_students';
   
   // 1. FETCH ROOMS AND LINK TO THE NEW STUDENT_ADMISSIONS TABLE!
   const { data: rooms, error: fetchError } = await supabase
@@ -26,7 +29,10 @@ export default async function RoomsPage() {
   
   rooms?.forEach(room => {
     totalBeds += room.beds?.length || 0;
-    occupiedBeds += room.beds?.filter((b: any) => b.is_occupied).length || 0;
+    occupiedBeds += room.beds?.filter((bed: any) => {
+      const admissions = Array.isArray(bed.student_admissions) ? bed.student_admissions : [];
+      return admissions.some((student: any) => student.status === 'ACTIVE');
+    }).length || 0;
   });
 
   async function addRoom(formData: FormData) {
@@ -75,12 +81,31 @@ export default async function RoomsPage() {
     
     if (bedsInRoom && bedsInRoom.length > 0) {
       const bedIds = bedsInRoom.map((b: any) => b.id);
+      const { data: activeStudentsInRoom } = await supabase
+        .from('student_admissions')
+        .select('id')
+        .in('bed_id', bedIds)
+        .eq('status', 'ACTIVE')
+        .limit(1);
+      if (activeStudentsInRoom && activeStudentsInRoom.length > 0) {
+        redirect('/rooms?error=room_has_students');
+      }
+
       // EVICT FROM NEW TABLE BEFORE DELETING BED
       await supabase.from('student_admissions').update({ bed_id: null, room_number: null, bed_number: null }).in('bed_id', bedIds);
-      await supabase.from('beds').delete().eq('room_id', room_id);
+      await supabase.from('students').update({ bed_id: null }).in('bed_id', bedIds);
+      const { error: deleteBedsError } = await supabase.from('beds').delete().eq('room_id', room_id);
+      if (deleteBedsError) {
+        console.error("DELETE BEDS ERROR:", deleteBedsError.message);
+        return;
+      }
     }
 
-    await supabase.from('rooms').delete().eq('id', room_id);
+    const { error: deleteRoomError } = await supabase.from('rooms').delete().eq('id', room_id);
+    if (deleteRoomError) {
+      console.error("DELETE ROOM ERROR:", deleteRoomError.message);
+      return;
+    }
     revalidatePath('/rooms');
     revalidatePath('/');
   }
@@ -91,7 +116,12 @@ export default async function RoomsPage() {
 
     // EVICT FROM NEW TABLE BEFORE DELETING
     await supabase.from('student_admissions').update({ bed_id: null, room_number: null, bed_number: null }).eq('bed_id', bed_id);
-    await supabase.from('beds').delete().eq('id', bed_id);
+    await supabase.from('students').update({ bed_id: null }).eq('bed_id', bed_id);
+    const { error: deleteBedError } = await supabase.from('beds').delete().eq('id', bed_id);
+    if (deleteBedError) {
+      console.error("DELETE SINGLE BED ERROR:", deleteBedError.message);
+      return;
+    }
 
     revalidatePath('/rooms');
     revalidatePath('/');
@@ -108,6 +138,11 @@ export default async function RoomsPage() {
         <div>
           <h2 className="text-4xl font-black text-slate-800 tracking-tight">🛏️ Bed Allocation Map</h2>
           <p className="text-slate-500 mt-2 font-medium">Absolute Admin Control: Manage rooms, beds, and evictions.</p>
+          {roomDeleteBlocked && (
+            <p className="mt-3 inline-flex items-center rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700">
+              Remove the student first so the bed becomes vacant. Only then the room can be destroyed.
+            </p>
+          )}
         </div>
         
         <div className="flex gap-4">
@@ -201,16 +236,14 @@ export default async function RoomsPage() {
                   {room.beds?.map((bed: any) => {
                     
                     // SMART FETCH: Get the student name specifically from the new table!
-                    let studentName = null;
-                    if (bed.student_admissions && bed.student_admissions.length > 0) {
-                      // Find the active student assigned to this bed
-                      const activeStudent = bed.student_admissions.find((s:any) => s.status === 'ACTIVE');
-                      if (activeStudent) studentName = activeStudent.full_name;
-                    }
+                    const admissions = Array.isArray(bed.student_admissions) ? bed.student_admissions : [];
+                    const activeStudent = admissions.find((s: any) => s.status === 'ACTIVE');
+                    const studentName = activeStudent?.full_name || null;
+                    const isOccupied = Boolean(activeStudent);
 
-                    const bedBgColor = bed.is_occupied ? 'bg-rose-50/30 border-rose-100' : 'bg-emerald-50/30 border-emerald-100';
-                    const dotColor = bed.is_occupied ? 'bg-rose-500' : 'bg-emerald-500';
-                    const statusBadge = bed.is_occupied ? 'text-rose-600 bg-rose-100' : 'text-emerald-700 bg-emerald-100';
+                    const bedBgColor = isOccupied ? 'bg-rose-50/30 border-rose-100' : 'bg-emerald-50/30 border-emerald-100';
+                    const dotColor = isOccupied ? 'bg-rose-500' : 'bg-emerald-500';
+                    const statusBadge = isOccupied ? 'text-rose-600 bg-rose-100' : 'text-emerald-700 bg-emerald-100';
 
                     return (
                       <div key={bed.id} className={`p-3 rounded-xl border flex flex-col gap-2 transition-colors ${bedBgColor}`}>
@@ -223,13 +256,13 @@ export default async function RoomsPage() {
                             </span>
                           </p>
                           <span className={`text-[10px] font-extrabold px-2 py-1 rounded uppercase tracking-wider ${statusBadge}`}>
-                            {bed.is_occupied ? 'Occupied' : 'Vacant'}
+                            {isOccupied ? 'Occupied' : 'Vacant'}
                           </span>
                         </div>
                         
                         <div className="flex justify-between items-end">
                           <div>
-                            {bed.is_occupied && studentName && (
+                            {isOccupied && studentName && (
                               <p className="text-[10px] font-bold text-rose-600 uppercase tracking-wider mt-1 truncate max-w-[120px]">
                                 👤 {studentName}
                               </p>

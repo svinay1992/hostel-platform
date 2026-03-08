@@ -35,7 +35,7 @@ export default async function HelpdeskPage() {
     revalidatePath('/');
   }
 
-  const openTickets = tickets?.filter((t: any) => (t.status || '').toString().toLowerCase() === 'open') || [];
+  const openTickets = tickets?.filter((t: any) => (t.status || '').toString().toLowerCase() !== 'resolved') || [];
   const resolvedTickets = tickets?.filter((t: any) => (t.status || '').toString().toLowerCase() === 'resolved') || [];
 
   return (

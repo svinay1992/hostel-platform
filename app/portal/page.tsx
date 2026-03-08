@@ -63,38 +63,103 @@ export default async function StudentPortalDashboard() {
 
   async function submitComplaint(formData: FormData) {
     'use server';
-    const issueType = formData.get('issue_type') as string;
-    const description = formData.get('description') as string;
+    const issueType = (formData.get('issue_type') as string)?.trim();
+    const description = (formData.get('description') as string)?.trim();
+    const normalizedEmail = (student.email || '').trim().toLowerCase();
+    const phoneDigits = (student.phone || '').toString().replace(/\D+/g, '');
+
+    if (!issueType || !description || !normalizedEmail) return;
     
-    const { data: portalUser } = await supabase
+    const { data: existingPortalUsers } = await supabase
       .from('users')
       .select('id')
-      .eq('email', student.email)
-      .single();
+      .ilike('email', normalizedEmail)
+      .order('id', { ascending: false })
+      .limit(1);
 
-    if (!portalUser?.id) return;
+    let portalUserId: number | null = existingPortalUsers?.[0]?.id || null;
+
+    if (!portalUserId) {
+      const { data: newPortalUser, error: createPortalUserError } = await supabase
+        .from('users')
+        .insert([{
+          name: student.full_name || 'Student',
+          email: normalizedEmail,
+          role: 'student',
+          password: phoneDigits || '0000000000',
+        }])
+        .select('id')
+        .single();
+
+      if (createPortalUserError) {
+        console.error('COMPLAINT USER CREATE ERROR:', createPortalUserError.message);
+        return;
+      }
+
+      portalUserId = newPortalUser?.id || null;
+    }
 
     let legacyStudentId: number | null = null;
-    const { data: existingLegacyStudent } = await supabase
-      .from('students')
-      .select('id')
-      .eq('user_id', portalUser.id)
-      .maybeSingle();
 
-    if (existingLegacyStudent?.id) {
-      legacyStudentId = existingLegacyStudent.id;
+    if (portalUserId) {
+      const { data: existingLegacyStudent } = await supabase
+        .from('students')
+        .select('id')
+        .eq('user_id', portalUserId)
+        .maybeSingle();
+
+      if (existingLegacyStudent?.id) {
+        legacyStudentId = existingLegacyStudent.id;
+      } else {
+        // Keep complaints compatibility by ensuring the legacy student record exists.
+        const { data: createdLegacyStudent, error: legacyInsertError } = await supabase
+          .from('students')
+          .insert([{
+            user_id: portalUserId,
+            phone_number: phoneDigits || student.phone || null,
+            bed_id: student.bed_id || null,
+            security_deposit: student.security_deposit || 0,
+          }])
+          .select('id')
+          .single();
+
+        if (legacyInsertError) {
+          console.error('COMPLAINT LEGACY STUDENT SYNC ERROR:', legacyInsertError.message);
+        } else {
+          legacyStudentId = createdLegacyStudent?.id || null;
+        }
+      }
+    }
+
+    if (!legacyStudentId && phoneDigits) {
+      const { data: fallbackLegacyStudent } = await supabase
+        .from('students')
+        .select('id')
+        .ilike('phone_number', `%${phoneDigits}%`)
+        .order('id', { ascending: false })
+        .limit(1);
+
+      legacyStudentId = fallbackLegacyStudent?.[0]?.id || null;
     }
 
     if (legacyStudentId) {
-      await supabase.from('complaints').insert([{
+      const { error: complaintError } = await supabase.from('complaints').insert([{
         student_id: legacyStudentId,
         issue_type: issueType,
-        description: description?.trim(),
+        description,
         status: 'Open'
       }]);
+
+      if (complaintError) {
+        console.error('COMPLAINT INSERT ERROR:', complaintError.message);
+      }
+    } else {
+      console.error('COMPLAINT LINK ERROR: No legacy student mapping found for', normalizedEmail);
     }
 
     revalidatePath('/portal');
+    revalidatePath('/helpdesk');
+    revalidatePath('/');
   }
 
   return (

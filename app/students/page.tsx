@@ -19,11 +19,15 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
     .order('created_at', { ascending: false });
 
   // 2. FETCH VACANT BEDS (For the dropdown)
-  const { data: vacantBeds } = await supabase
+  const { data: bedsWithAdmissions } = await supabase
     .from('beds')
-    .select('id, bed_number, rooms(room_number)')
-    .eq('is_occupied', false)
+    .select('id, bed_number, rooms(room_number), student_admissions ( id, status )')
     .order('bed_number', { ascending: true });
+
+  const vacantBeds = (bedsWithAdmissions || []).filter((bed: any) => {
+    const admissions = Array.isArray(bed.student_admissions) ? bed.student_admissions : [];
+    return !admissions.some((student: any) => student.status === 'ACTIVE');
+  });
 
   const activeStudents = students?.filter(s => s.status === 'ACTIVE') || [];
 
@@ -64,6 +68,16 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
 
     if (bed_id_raw !== 'unassigned') {
       bed_id = parseInt(bed_id_raw);
+      const { data: activeOccupant } = await supabase
+        .from('student_admissions')
+        .select('id')
+        .eq('bed_id', bed_id)
+        .eq('status', 'ACTIVE')
+        .maybeSingle();
+      if (activeOccupant) {
+        console.error("BED ALREADY OCCUPIED:", bed_id);
+        redirect('/students?add=true');
+      }
       const { data: bedData } = await supabase.from('beds').select('bed_number, rooms(room_number)').eq('id', bed_id).single();
       if (bedData) {
         bed_number = bedData.bed_number;
@@ -164,7 +178,10 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
     const bed_id = formData.get('bed_id') as string;
 
     await supabase.from('student_admissions').update({ status: 'LEFT', bed_id: null, room_number: null, bed_number: null }).eq('id', id);
-    if (bed_id) await supabase.from('beds').update({ is_occupied: false }).eq('id', bed_id);
+    if (bed_id) {
+      await supabase.from('students').update({ bed_id: null }).eq('bed_id', bed_id);
+      await supabase.from('beds').update({ is_occupied: false }).eq('id', bed_id);
+    }
 
     revalidatePath('/students');
     revalidatePath('/rooms');
