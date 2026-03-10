@@ -5,6 +5,7 @@ import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
+import { addActivityLog } from '../../lib/activity-log-cache';
 
 // In Next.js, we use searchParams to figure out if we are in "Edit" mode
 export default async function ExpensesPage({ searchParams }: { searchParams: Promise<{ edit?: string }> }) {
@@ -16,6 +17,7 @@ export default async function ExpensesPage({ searchParams }: { searchParams: Pro
   const { data: expenses } = await supabase
     .from('expenses')
     .select('*')
+    .neq('category', 'Inventory Purchase')
     .order('expense_date', { ascending: false });
 
   // 2. READ (Single): If editing, fetch that specific record
@@ -36,6 +38,13 @@ export default async function ExpensesPage({ searchParams }: { searchParams: Pro
     const expense_date = formData.get('expense_date') as string;
 
     await supabase.from('expenses').insert([{ title, category, amount, expense_date }]);
+    await addActivityLog({
+      module: 'Expenses',
+      action: 'Expense Added',
+      details: `${title} (${category}) Rs ${amount} on ${expense_date}`,
+      actor: 'admin',
+      level: 'info',
+    });
     revalidatePath('/expenses');
     revalidatePath('/'); // Update dashboard!
   }
@@ -49,7 +58,20 @@ export default async function ExpensesPage({ searchParams }: { searchParams: Pro
     const amount = parseFloat(formData.get('amount') as string);
     const expense_date = formData.get('expense_date') as string;
 
+    const { data: existingExpense } = await supabase
+      .from('expenses')
+      .select('title')
+      .eq('id', id)
+      .single();
+
     await supabase.from('expenses').update({ title, category, amount, expense_date }).eq('id', id);
+    await addActivityLog({
+      module: 'Expenses',
+      action: 'Expense Updated',
+      details: `${existingExpense?.title || `Expense #${id}`} updated to Rs ${amount} (${category})`,
+      actor: 'admin',
+      level: 'warning',
+    });
     
     revalidatePath('/expenses');
     revalidatePath('/');
@@ -60,7 +82,19 @@ export default async function ExpensesPage({ searchParams }: { searchParams: Pro
   async function deleteExpense(formData: FormData) {
     'use server';
     const id = formData.get('id') as string;
+    const { data: existingExpense } = await supabase
+      .from('expenses')
+      .select('title, amount')
+      .eq('id', id)
+      .single();
     await supabase.from('expenses').delete().eq('id', id);
+    await addActivityLog({
+      module: 'Expenses',
+      action: 'Expense Deleted',
+      details: `${existingExpense?.title || `Expense #${id}`} deleted (Rs ${Number(existingExpense?.amount || 0)})`,
+      actor: 'admin',
+      level: 'critical',
+    });
     revalidatePath('/expenses');
     revalidatePath('/');
   }

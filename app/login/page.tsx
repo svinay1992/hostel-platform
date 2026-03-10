@@ -1,5 +1,6 @@
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers'; 
+import { addActivityLog } from '../../lib/activity-log-cache';
 
 export default function LoginPage() {
   
@@ -18,9 +19,23 @@ export default function LoginPage() {
         secure: true,
         maxAge: 60 * 60 * 24 // Badge expires in 24 hours
       });
+      await addActivityLog({
+        module: 'Admin Auth',
+        action: 'Admin Login',
+        details: 'Admin logged into control panel',
+        actor: 'admin',
+        level: 'info',
+      });
       
       redirect('/'); 
     } else {
+      await addActivityLog({
+        module: 'Admin Auth',
+        action: 'Admin Login Failed',
+        details: `Failed admin login attempt for email ${String(email || '')}`,
+        actor: 'admin',
+        level: 'warning',
+      });
       redirect('/login?error=true');
     }
   }

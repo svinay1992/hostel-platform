@@ -5,18 +5,58 @@ import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
+import PrintCardButton from '../_components/print-card-button';
+import {
+  getStudentElectricityMap,
+  removeStudentElectricityData,
+  setStudentElectricityData
+} from '../../lib/student-electricity-cache';
+import { addActivityLog } from '../../lib/activity-log-cache';
 
-export default async function StudentsPage({ searchParams }: { searchParams: Promise<{ view?: string, add?: string }> }) {
+function isValidEmail(email: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidIndianPhone(phone: string) {
+  return /^[6-9]\d{9}$/.test(phone);
+}
+
+function isReasonableDateOfBirth(value: string) {
+  const dob = new Date(value);
+  if (Number.isNaN(dob.getTime())) return false;
+  const now = new Date();
+  const ageYears = (now.getTime() - dob.getTime()) / (1000 * 60 * 60 * 24 * 365.25);
+  return ageYears >= 12 && ageYears <= 60;
+}
+
+export default async function StudentsPage({ searchParams }: { searchParams: Promise<{ view?: string, add?: string, qr?: string, error?: string }> }) {
   
   const resolvedParams = await searchParams;
   const viewId = resolvedParams?.view;
+  const qrId = resolvedParams?.qr;
   const showAddForm = resolvedParams?.add === 'true';
+  const addError = (resolvedParams?.error || '').toLowerCase();
+  const studentError = (resolvedParams?.error || '').toLowerCase();
 
   // 1. FETCH FROM THE NEW CHATGPT TABLE
   const { data: students } = await supabase
     .from('student_admissions')
     .select('*')
     .order('created_at', { ascending: false });
+  const studentElectricityMap = await getStudentElectricityMap(
+    (students || []).map((student: any) => Number(student.id)).filter((id: number) => Number.isFinite(id))
+  );
+  const studentsWithElectricity = (students || []).map((student: any) => {
+    const cached = studentElectricityMap[Number(student.id)];
+    const units = Number(student.electricity_units ?? 0);
+    const rate = Number(student.electricity_rate_per_unit ?? 0);
+
+    return {
+      ...student,
+      electricity_units: units > 0 ? units : Number(cached?.units ?? 0),
+      electricity_rate_per_unit: rate > 0 ? rate : Number(cached?.ratePerUnit ?? 0),
+    };
+  });
 
   // 2. FETCH VACANT BEDS (For the dropdown)
   const { data: bedsWithAdmissions } = await supabase
@@ -28,37 +68,91 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
     const admissions = Array.isArray(bed.student_admissions) ? bed.student_admissions : [];
     return !admissions.some((student: any) => student.status === 'ACTIVE');
   });
+  const bedsById = new Map((bedsWithAdmissions || []).map((bed: any) => [Number(bed.id), bed]));
 
-  const activeStudents = students?.filter(s => s.status === 'ACTIVE') || [];
+  const activeStudents = studentsWithElectricity.filter((s: any) => s.status === 'ACTIVE');
+  const leftStudents = studentsWithElectricity.filter((s: any) => s.status === 'LEFT');
 
   // 3. SERVER ACTION: Complete Admission
   async function admitStudent(formData: FormData) {
     'use server';
     
     // Extracting strict required fields
-    const full_name = (formData.get('full_name') as string)?.trim();
-    const email = (formData.get('email') as string)?.trim().toLowerCase();
-    const phone = (formData.get('phone') as string)?.replace(/\s+/g, '');
-    const date_of_birth = formData.get('date_of_birth') as string;
-    const home_address = formData.get('home_address') as string;
-    const parent_name = formData.get('parent_name') as string;
-    const parent_phone = formData.get('parent_phone') as string;
+    const full_name = ((formData.get('full_name') as string) || '').trim();
+    const email = ((formData.get('email') as string) || '').trim().toLowerCase();
+    const phone = ((formData.get('phone') as string) || '').replace(/\D+/g, '');
+    const date_of_birth = (formData.get('date_of_birth') as string) || '';
+    const home_address = ((formData.get('home_address') as string) || '').trim();
+    const parent_name = ((formData.get('parent_name') as string) || '').trim();
+    const parent_phone = ((formData.get('parent_phone') as string) || '').replace(/\D+/g, '');
+
+    if (!full_name || full_name.length < 3 || !/^[A-Za-z ]+$/.test(full_name)) {
+      return redirect('/students?add=true&error=invalid_name');
+    }
+    if (!email || !isValidEmail(email)) {
+      return redirect('/students?add=true&error=invalid_email');
+    }
+    if (!isValidIndianPhone(phone)) {
+      return redirect('/students?add=true&error=invalid_phone');
+    }
+    if (!date_of_birth || !isReasonableDateOfBirth(date_of_birth)) {
+      return redirect('/students?add=true&error=invalid_dob');
+    }
+    if (!home_address || home_address.length < 10) {
+      return redirect('/students?add=true&error=invalid_address');
+    }
+    if (!parent_name || parent_name.length < 3 || !/^[A-Za-z ]+$/.test(parent_name)) {
+      return redirect('/students?add=true&error=invalid_parent_name');
+    }
+    if (!isValidIndianPhone(parent_phone)) {
+      return redirect('/students?add=true&error=invalid_parent_phone');
+    }
+
+    const { data: existingAdmissionByEmail } = await supabase
+      .from('student_admissions')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
+    if (existingAdmissionByEmail?.id) {
+      return redirect('/students?add=true&error=email_used');
+    }
     
     // Optional & Enum fields
     const blood_group = formData.get('blood_group') as string;
-    const coaching_name = formData.get('coaching_name') as string;
-    const course = formData.get('course') as string;
-    const timing = formData.get('timing') as string;
+    const coaching_name = ((formData.get('coaching_name') as string) || '').trim();
+    const course = ((formData.get('course') as string) || '').trim();
+    const timing = ((formData.get('timing') as string) || '').trim();
     const food_preference = formData.get('food_preference') as string;
+    if (coaching_name.length > 0 && coaching_name.length < 2) {
+      return redirect('/students?add=true&error=invalid_coaching');
+    }
+    if (timing.length > 0 && timing.length < 3) {
+      return redirect('/students?add=true&error=invalid_timing');
+    }
 
     // Financial Data
-    const security_deposit = parseFloat(formData.get('security_deposit') as string) || 0;
+    const security_deposit = Number((formData.get('security_deposit') as string) || 0);
     const sd_date = formData.get('deposit_date') as string;
     const deposit_date = sd_date ? sd_date : null;
     
-    const advance_rent = parseFloat(formData.get('advance_rent') as string) || 0;
+    const advance_rent = Number((formData.get('advance_rent') as string) || 0);
     const ar_date = formData.get('rent_date') as string;
     const rent_date = ar_date ? ar_date : null;
+    const electricity_units = Number((formData.get('electricity_units') as string) || 0);
+    const electricity_rate_per_unit = Number((formData.get('electricity_rate_per_unit') as string) || 0);
+
+    if (!Number.isFinite(security_deposit) || security_deposit < 0 || security_deposit > 5000000) {
+      return redirect('/students?add=true&error=invalid_security_deposit');
+    }
+    if (!Number.isFinite(advance_rent) || advance_rent < 0 || advance_rent > 5000000) {
+      return redirect('/students?add=true&error=invalid_advance_rent');
+    }
+    if (!Number.isFinite(electricity_units) || electricity_units < 0 || electricity_units > 100000) {
+      return redirect('/students?add=true&error=invalid_electricity_units');
+    }
+    if (!Number.isFinite(electricity_rate_per_unit) || electricity_rate_per_unit < 0 || electricity_rate_per_unit > 10000) {
+      return redirect('/students?add=true&error=invalid_electricity_rate');
+    }
 
     // Bed Allocation Logic
     const bed_id_raw = formData.get('bed_id') as string;
@@ -68,6 +162,9 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
 
     if (bed_id_raw !== 'unassigned') {
       bed_id = parseInt(bed_id_raw);
+      if (!Number.isFinite(bed_id) || bed_id <= 0) {
+        return redirect('/students?add=true&error=invalid_bed');
+      }
       const { data: activeOccupant } = await supabase
         .from('student_admissions')
         .select('id')
@@ -76,7 +173,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
         .maybeSingle();
       if (activeOccupant) {
         console.error("BED ALREADY OCCUPIED:", bed_id);
-        redirect('/students?add=true');
+        redirect('/students?add=true&error=bed_occupied');
       }
       const { data: bedData } = await supabase.from('beds').select('bed_number, rooms(room_number)').eq('id', bed_id).single();
       if (bedData) {
@@ -108,22 +205,70 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
         .select()
         .single();
       
-      if (userError) return console.error("❌ USER ERROR:", userError.message);
+      if (userError) return redirect('/students?add=true&error=user_create_failed');
       targetUserId = newUser.id;
     }
 
     // Insert directly into the new student table
     if (targetUserId) {
-      const { error: studentError } = await supabase.from('student_admissions').insert([{
+      const studentInsertPayload = {
         full_name, email, phone, date_of_birth, blood_group, home_address,
         parent_name, parent_phone, coaching_name, course, timing,
         food_preference, room_number, bed_number, bed_id,
         security_deposit, deposit_date, advance_rent, rent_date,
+        electricity_units, electricity_rate_per_unit,
         status: 'ACTIVE'
-      }]);
+      };
+
+      let admittedStudentId: number | null = null;
+      let studentError: { message: string } | null = null;
+
+      const { data: insertedStudent, error: insertWithElectricityError } = await supabase
+        .from('student_admissions')
+        .insert([studentInsertPayload])
+        .select('id')
+        .single();
+
+      studentError = (insertWithElectricityError as { message: string } | null) || null;
+      admittedStudentId = insertedStudent?.id ? Number(insertedStudent.id) : null;
+
+      if (
+        studentError &&
+        (
+          studentError.message.includes('electricity_units') ||
+          studentError.message.includes('electricity_rate_per_unit')
+        )
+      ) {
+        const {
+          electricity_units: _ignoreUnits,
+          electricity_rate_per_unit: _ignoreRate,
+          ...legacyStudentInsertPayload
+        } = studentInsertPayload;
+
+        const { data: legacyInsertedStudent, error: legacyStudentAdmissionError } = await supabase
+          .from('student_admissions')
+          .insert([legacyStudentInsertPayload])
+          .select('id')
+          .single();
+
+        studentError = (legacyStudentAdmissionError as { message: string } | null) || null;
+        admittedStudentId = legacyInsertedStudent?.id ? Number(legacyInsertedStudent.id) : admittedStudentId;
+      }
+
+      if (!studentError && admittedStudentId) {
+        await setStudentElectricityData(
+          admittedStudentId,
+          Number(electricity_units || 0),
+          Number(electricity_rate_per_unit || 0)
+        );
+      }
 
       if (studentError) {
         console.error("❌ INSERT ERROR:", studentError.message);
+        if ((studentError.message || '').toLowerCase().includes('student_admissions_email_key')) {
+          return redirect('/students?add=true&error=email_used');
+        }
+        return redirect('/students?add=true&error=admission_failed');
       } else {
         // Keep legacy `students` table in sync for modules using student_id FK (e.g. complaints)
         const { data: legacyStudent } = await supabase
@@ -162,6 +307,13 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
         if (bed_id) {
           await supabase.from('beds').update({ is_occupied: true }).eq('id', bed_id);
         }
+        await addActivityLog({
+          module: 'Students',
+          action: 'Student Admitted',
+          details: `${full_name} admitted${room_number ? ` to Room ${room_number}` : ''}${bed_number ? ` / Bed ${bed_number}` : ''}`,
+          actor: 'admin',
+          level: 'info',
+        });
       }
     }
 
@@ -176,19 +328,177 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
     'use server';
     const id = formData.get('id') as string;
     const bed_id = formData.get('bed_id') as string;
+    const { data: studentRow } = await supabase.from('student_admissions').select('full_name').eq('id', id).single();
 
     await supabase.from('student_admissions').update({ status: 'LEFT', bed_id: null, room_number: null, bed_number: null }).eq('id', id);
+    await removeStudentElectricityData(Number(id));
     if (bed_id) {
       await supabase.from('students').update({ bed_id: null }).eq('bed_id', bed_id);
       await supabase.from('beds').update({ is_occupied: false }).eq('id', bed_id);
     }
+    await addActivityLog({
+      module: 'Students',
+      action: 'Student Move Out',
+      details: `${studentRow?.full_name || `Student #${id}`} moved out and marked LEFT`,
+      actor: 'admin',
+      level: 'warning',
+    });
 
     revalidatePath('/students');
     revalidatePath('/rooms');
     revalidatePath('/');
   }
 
-  const viewingStudent = viewId ? students?.find((s: any) => s.id.toString() === viewId) : null;
+  async function changeStudentBed(formData: FormData) {
+    'use server';
+    const studentId = Number(formData.get('student_id') || 0);
+    const newBedId = Number(formData.get('new_bed_id') || 0);
+
+    if (!studentId) return redirect('/students?error=bed_change_invalid_student');
+    if (!newBedId || !Number.isFinite(newBedId) || newBedId <= 0) return redirect('/students?error=bed_change_invalid_bed');
+
+    const { data: studentRow } = await supabase
+      .from('student_admissions')
+      .select('id, full_name, email, status, bed_id')
+      .eq('id', studentId)
+      .eq('status', 'ACTIVE')
+      .single();
+    if (!studentRow?.id) return redirect('/students?error=bed_change_invalid_student');
+
+    const { data: targetBed } = await supabase
+      .from('beds')
+      .select('id, bed_number, rooms(room_number)')
+      .eq('id', newBedId)
+      .single();
+    if (!targetBed?.id) return redirect('/students?error=bed_change_invalid_bed');
+
+    const { data: occupiedByAnother } = await supabase
+      .from('student_admissions')
+      .select('id')
+      .eq('bed_id', newBedId)
+      .eq('status', 'ACTIVE')
+      .neq('id', studentId)
+      .maybeSingle();
+    if (occupiedByAnother?.id) return redirect('/students?error=bed_change_occupied');
+
+    const previousBedId = studentRow.bed_id ? Number(studentRow.bed_id) : null;
+    const nextRoomNumber = (targetBed.rooms as any)?.room_number || null;
+    const nextBedNumber = targetBed.bed_number || null;
+
+    const { error: updateAdmissionError } = await supabase
+      .from('student_admissions')
+      .update({
+        bed_id: newBedId,
+        room_number: nextRoomNumber,
+        bed_number: nextBedNumber,
+      })
+      .eq('id', studentId);
+    if (updateAdmissionError) return redirect('/students?error=bed_change_failed');
+
+    if (previousBedId && previousBedId !== newBedId) {
+      await supabase.from('beds').update({ is_occupied: false }).eq('id', previousBedId);
+    }
+    await supabase.from('beds').update({ is_occupied: true }).eq('id', newBedId);
+
+    const normalizedEmail = (studentRow.email || '').trim().toLowerCase();
+    if (normalizedEmail) {
+      const { data: userRow } = await supabase
+        .from('users')
+        .select('id')
+        .ilike('email', normalizedEmail)
+        .maybeSingle();
+      if (userRow?.id) {
+        await supabase.from('students').update({ bed_id: newBedId }).eq('user_id', userRow.id);
+      }
+    }
+
+    await addActivityLog({
+      module: 'Students',
+      action: 'Bed Changed',
+      details: `${studentRow.full_name || `Student #${studentId}`} shifted to Room ${nextRoomNumber || '-'} / Bed ${nextBedNumber || '-'}`,
+      actor: 'admin',
+      level: 'info',
+    });
+
+    revalidatePath('/students');
+    revalidatePath('/rooms');
+    revalidatePath('/');
+    return redirect('/students?error=bed_change_success');
+  }
+
+  async function deleteStudentPermanently(formData: FormData) {
+    'use server';
+    const id = Number(formData.get('id') || 0);
+    if (!id) return;
+
+    const { data: studentRow } = await supabase
+      .from('student_admissions')
+      .select('id, full_name, email, bed_id')
+      .eq('id', id)
+      .single();
+
+    if (!studentRow) return;
+
+    if (studentRow.bed_id) {
+      await supabase.from('beds').update({ is_occupied: false }).eq('id', studentRow.bed_id);
+    }
+
+    // Remove finance rows tied to this admission id.
+    await supabase.from('invoices').delete().eq('student_id', id);
+
+    // Remove legacy link rows and portal user by email.
+    const normalizedEmail = (studentRow.email || '').trim().toLowerCase();
+    if (normalizedEmail) {
+      const { data: userRow } = await supabase
+        .from('users')
+        .select('id')
+        .ilike('email', normalizedEmail)
+        .maybeSingle();
+
+      if (userRow?.id) {
+        const { data: legacyStudents } = await supabase
+          .from('students')
+          .select('id')
+          .eq('user_id', userRow.id);
+
+        const legacyIds = (legacyStudents || []).map((row: any) => Number(row.id)).filter((value: number) => Number.isFinite(value));
+        if (legacyIds.length > 0) {
+          await supabase.from('complaints').delete().in('student_id', legacyIds);
+        }
+        await supabase.from('students').delete().eq('user_id', userRow.id);
+        await supabase.from('users').delete().eq('id', userRow.id);
+      }
+    }
+
+    await supabase.from('student_admissions').delete().eq('id', id);
+    await removeStudentElectricityData(id);
+
+    await addActivityLog({
+      module: 'Students',
+      action: 'Student Deleted Permanently',
+      details: `${studentRow.full_name || `Student #${id}`} removed from admissions and linked tables`,
+      actor: 'admin',
+      level: 'critical',
+    });
+
+    revalidatePath('/students');
+    revalidatePath('/rooms');
+    revalidatePath('/finance');
+    revalidatePath('/helpdesk');
+    revalidatePath('/portal');
+    revalidatePath('/');
+  }
+
+  const viewingStudent = viewId ? studentsWithElectricity.find((s: any) => s.id.toString() === viewId) : null;
+  const qrStudent = qrId ? studentsWithElectricity.find((s: any) => s.id.toString() === qrId) : null;
+
+  const appBaseUrl = (process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+
+  const makeQrPayload = (email: string, phone: string) => {
+    const normalizedEmail = (email || '').trim().toLowerCase();
+    const normalizedPhone = (phone || '').toString().replace(/\D+/g, '');
+    return `${appBaseUrl}/portal-login?email=${encodeURIComponent(normalizedEmail)}&password=${encodeURIComponent(normalizedPhone)}`;
+  };
 
   return (
     <main className="flex-1 p-8 lg:p-12 overflow-y-auto bg-[#F8FAFC] h-full font-sans relative">
@@ -213,6 +523,22 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
           </Link>
         </div>
       </header>
+
+      {studentError && !showAddForm && (
+        <div
+          className={`mb-6 rounded-xl border px-4 py-3 text-sm font-semibold relative z-10 ${
+            studentError === 'bed_change_success'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+              : 'border-rose-200 bg-rose-50 text-rose-700'
+          }`}
+        >
+          {studentError === 'bed_change_success' && 'Bed assignment updated successfully.'}
+          {studentError === 'bed_change_invalid_student' && 'Student record is invalid or inactive.'}
+          {studentError === 'bed_change_invalid_bed' && 'Selected bed is invalid.'}
+          {studentError === 'bed_change_occupied' && 'Selected bed is already occupied. Choose another vacant bed.'}
+          {studentError === 'bed_change_failed' && 'Could not update bed assignment. Please retry.'}
+        </div>
+      )}
 
       {/* DIRECTORY TABLE */}
       <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden relative z-10 mb-8">
@@ -255,6 +581,44 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                       <Link href={`/students?view=${student.id}`} className="text-indigo-600 hover:text-indigo-800 font-bold text-xs uppercase tracking-wider bg-indigo-50 hover:bg-indigo-100 px-3 py-2 rounded-lg transition-colors">
                         View Profile
                       </Link>
+
+                      <Link
+                        href={`/students?view=${student.id}&qr=${student.id}`}
+                        className="h-9 w-9 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center shadow-sm transition-colors"
+                        title="Student Login Barcode"
+                      >
+                        <span className="text-base leading-none">⌁</span>
+                      </Link>
+
+                      <form action={changeStudentBed} className="flex items-center gap-2">
+                        <input type="hidden" name="student_id" value={student.id} />
+                        <select
+                          name="new_bed_id"
+                          required
+                          defaultValue={student.bed_id ? String(student.bed_id) : ''}
+                          className="min-w-[11rem] rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none"
+                        >
+                          <option value="" disabled>
+                            Select vacant bed
+                          </option>
+                          {student.bed_id && bedsById.get(Number(student.bed_id)) && (
+                            <option value={student.bed_id}>
+                              Current: Room {(bedsById.get(Number(student.bed_id)) as any)?.rooms?.room_number} - Bed {(bedsById.get(Number(student.bed_id)) as any)?.bed_number}
+                            </option>
+                          )}
+                          {vacantBeds.map((bed: any) => (
+                            <option key={`move-bed-${student.id}-${bed.id}`} value={bed.id}>
+                              Room {bed.rooms?.room_number} - Bed {bed.bed_number}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="submit"
+                          className="text-amber-700 hover:text-amber-800 font-bold text-xs uppercase tracking-wider bg-amber-50 hover:bg-amber-100 px-3 py-2 rounded-lg transition-colors border border-amber-100 whitespace-nowrap"
+                        >
+                          Change Bed
+                        </button>
+                      </form>
                       
                       <form action={moveToAlumni}>
                         <input type="hidden" name="id" value={student.id} />
@@ -276,10 +640,71 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
         </div>
       </div>
 
+      {/* LEFT / ALUMNI TABLE WITH HARD DELETE */}
+      <div className="bg-white rounded-3xl shadow-sm border border-rose-100 overflow-hidden relative z-10 mb-8">
+        <div className="p-6 border-b border-rose-100 bg-rose-50/40">
+          <h3 className="text-lg font-black text-slate-800">Left / Alumni Records</h3>
+          <p className="text-xs text-slate-500 mt-1">Hard delete removes student data from linked project tables.</p>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-white text-slate-400 text-xs uppercase tracking-widest border-b border-slate-100">
+              <tr>
+                <th className="p-6">Resident</th>
+                <th className="p-6">Contact</th>
+                <th className="p-6">Status</th>
+                <th className="p-6 text-center">Action</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50 text-sm bg-white">
+              {leftStudents.map((student: any) => (
+                <tr key={`left-${student.id}`} className="hover:bg-slate-50 transition-colors">
+                  <td className="p-6">
+                    <p className="font-bold text-slate-900">{student.full_name}</p>
+                    <p className="text-xs text-slate-500 mt-1">{student.coaching_name || 'No Coaching Info'}</p>
+                  </td>
+                  <td className="p-6">
+                    <p className="font-medium text-slate-700">{student.phone || 'N/A'}</p>
+                    <p className="text-xs text-slate-500 mt-1">{student.email || 'N/A'}</p>
+                  </td>
+                  <td className="p-6">
+                    <span className="inline-flex items-center rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">
+                      LEFT
+                    </span>
+                  </td>
+                  <td className="p-6">
+                    <div className="flex justify-center">
+                      <form action={deleteStudentPermanently}>
+                        <input type="hidden" name="id" value={student.id} />
+                        <button
+                          type="submit"
+                          className="text-rose-600 hover:text-rose-700 font-bold text-xs uppercase tracking-wider bg-rose-50 hover:bg-rose-100 px-3 py-2 rounded-lg transition-colors border border-rose-100"
+                        >
+                          Delete Permanently
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+              {leftStudents.length === 0 && (
+                <tr>
+                  <td colSpan={4} className="p-10 text-center text-slate-400 italic">
+                    No left/alumni records found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       {/* ADMISSION FORM MODAL */}
       {showAddForm && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex justify-center items-center p-4 overflow-y-auto">
-          <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-5xl overflow-hidden my-8 border border-white/20">
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex justify-center items-start p-2 sm:p-3 overflow-hidden">
+          <div className="w-full flex justify-center">
+            <div className="origin-top w-full max-w-5xl scale-[0.58] sm:scale-[0.66] md:scale-[0.76] lg:scale-[0.86] xl:scale-[0.94] 2xl:scale-100">
+              <div className="bg-white rounded-[2rem] shadow-2xl w-full overflow-hidden border border-white/20">
             
             <div className="bg-indigo-600 p-6 flex justify-between items-center text-white">
               <div>
@@ -290,6 +715,34 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
             </div>
 
             <form action={admitStudent} className="p-8">
+              {addError && (
+                <div
+                  className={`mb-5 rounded-xl border px-4 py-3 text-sm font-semibold ${
+                    addError === 'email_used'
+                      ? 'border-rose-200 bg-rose-50 text-rose-700'
+                      : 'border-amber-200 bg-amber-50 text-amber-700'
+                  }`}
+                >
+                  {addError === 'email_used' && 'Email id is already used. Try another one.'}
+                  {addError === 'bed_occupied' && 'Selected bed is occupied. Please choose another bed.'}
+                  {addError === 'user_create_failed' && 'Portal user could not be created. Please retry.'}
+                  {addError === 'admission_failed' && 'Admission failed. Please check details and retry.'}
+                  {addError === 'invalid_name' && 'Enter valid full name (letters/spaces only, min 3 characters).'}
+                  {addError === 'invalid_email' && 'Enter a valid email address.'}
+                  {addError === 'invalid_phone' && 'Enter a valid 10-digit mobile number.'}
+                  {addError === 'invalid_dob' && 'Date of birth is invalid. Allowed age range is 12 to 60 years.'}
+                  {addError === 'invalid_address' && 'Home address should be at least 10 characters.'}
+                  {addError === 'invalid_parent_name' && 'Enter valid parent name (letters/spaces only, min 3 characters).'}
+                  {addError === 'invalid_parent_phone' && 'Enter valid parent 10-digit mobile number.'}
+                  {addError === 'invalid_coaching' && 'Coaching/college name is too short.'}
+                  {addError === 'invalid_timing' && 'Timing value is too short.'}
+                  {addError === 'invalid_security_deposit' && 'Security deposit must be between 0 and 50,00,000.'}
+                  {addError === 'invalid_advance_rent' && 'Advance rent must be between 0 and 50,00,000.'}
+                  {addError === 'invalid_electricity_units' && 'Electricity units must be between 0 and 1,00,000.'}
+                  {addError === 'invalid_electricity_rate' && 'Electricity rate must be between 0 and 10,000.'}
+                  {addError === 'invalid_bed' && 'Selected bed is invalid. Please choose again.'}
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
                 
                 {/* PERSONAL INFO */}
@@ -297,16 +750,16 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                   <h4 className="font-black text-slate-800 border-b border-slate-100 pb-2 uppercase tracking-widest text-xs">Personal Info</h4>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Full Name</label>
-                    <input type="text" name="full_name" required placeholder="e.g. Rahul Kumar" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                    <input type="text" name="full_name" required minLength={3} maxLength={60} pattern="[A-Za-z ]+" title="Use letters and spaces only" placeholder="e.g. Rahul Kumar" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Email Address (PORTAL USERNAME)</label>
-                    <input type="email" name="email" required placeholder="rahul@example.com" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                    <input type="email" name="email" required maxLength={120} placeholder="rahul@example.com" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Date of Birth</label>
-                      <input type="date" name="date_of_birth" required className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-indigo-500 outline-none" />
+                      <input type="date" name="date_of_birth" required max={new Date().toISOString().slice(0, 10)} className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-indigo-500 outline-none" />
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Blood Group</label>
@@ -319,7 +772,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                   </div>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Home Address</label>
-                    <textarea name="home_address" required rows={2} placeholder="Full residential address" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none resize-none"></textarea>
+                    <textarea name="home_address" required minLength={10} maxLength={300} rows={2} placeholder="Full residential address" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none resize-none"></textarea>
                   </div>
                 </div>
 
@@ -328,23 +781,24 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                   <h4 className="font-black text-slate-800 border-b border-slate-100 pb-2 uppercase tracking-widest text-xs">Academics & Contact</h4>
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Phone Number (PORTAL PASSWORD)</label>
-                    <input type="text" name="phone" required placeholder="9876543210" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                    <input type="tel" name="phone" required pattern="[6-9][0-9]{9}" title="Enter valid 10-digit mobile number" maxLength={10} placeholder="9876543210" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                    <p className="text-[10px] font-bold text-amber-600 mt-1">Login PIN will be the last 4 digits of this phone number.</p>
                   </div>
                   
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 text-rose-500">Parent Name</label>
-                      <input type="text" name="parent_name" required placeholder="Name" className="w-full bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-rose-300 focus:ring-2 focus:ring-rose-500 outline-none" />
+                      <input type="text" name="parent_name" required minLength={3} maxLength={60} pattern="[A-Za-z ]+" title="Use letters and spaces only" placeholder="Name" className="w-full bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-rose-300 focus:ring-2 focus:ring-rose-500 outline-none" />
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 text-rose-500">Parent Phone</label>
-                      <input type="text" name="parent_phone" required placeholder="Number" className="w-full bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-rose-300 focus:ring-2 focus:ring-rose-500 outline-none" />
+                      <input type="tel" name="parent_phone" required pattern="[6-9][0-9]{9}" title="Enter valid 10-digit mobile number" maxLength={10} placeholder="Number" className="w-full bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-rose-300 focus:ring-2 focus:ring-rose-500 outline-none" />
                     </div>
                   </div>
 
                   <div>
                     <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Coaching / College Name</label>
-                    <input type="text" name="coaching_name" placeholder="e.g. Allen, Resonance" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                    <input type="text" name="coaching_name" minLength={2} maxLength={80} placeholder="e.g. Allen, Resonance" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
@@ -357,7 +811,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                     </div>
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Timing</label>
-                      <input type="text" name="timing" placeholder="8 AM - 2 PM" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
+                      <input type="text" name="timing" minLength={3} maxLength={40} placeholder="8 AM - 2 PM" className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-3 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-indigo-500 outline-none" />
                     </div>
                   </div>
                 </div>
@@ -391,7 +845,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                     <div className="grid grid-cols-2 gap-3 mb-3">
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Security Deposit</label>
-                        <input type="number" name="security_deposit" placeholder="₹5000" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
+                        <input type="number" name="security_deposit" min={0} max={5000000} step="0.01" placeholder="₹5000" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Deposit Date</label>
@@ -400,12 +854,22 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Advance Rent</label>
-                        <input type="number" name="advance_rent" placeholder="₹6000" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Advance Rent (Monthly Base Rent)</label>
+                        <input type="number" name="advance_rent" min={0} max={5000000} step="0.01" placeholder="₹6000" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
                       </div>
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Rent Date</label>
                         <input type="date" name="rent_date" defaultValue={new Date().toISOString().slice(0, 10)} className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-emerald-500 outline-none" />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3 mt-3">
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Electricity Units</label>
+                        <input type="number" step="0.01" min={0} max={100000} name="electricity_units" placeholder="e.g. 120" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Rs per Unit</label>
+                        <input type="number" step="0.01" min={0} max={10000} name="electricity_rate_per_unit" placeholder="e.g. 12" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
                       </div>
                     </div>
                   </div>
@@ -419,16 +883,20 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                 <button type="submit" className="bg-indigo-600 hover:bg-indigo-700 text-white font-black px-12 py-4 rounded-xl shadow-lg transition-transform hover:-translate-y-1">Confirm Admission</button>
               </div>
             </form>
+              </div>
+            </div>
           </div>
         </div>
       )}
 
       {/* VIEW PROFILE MODAL */}
       {viewingStudent && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex justify-center items-center p-4">
-          <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-2xl overflow-hidden border border-white/20 relative">
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-50 flex justify-center items-start p-2 sm:p-3 overflow-hidden">
+          <div className="w-full flex justify-center">
+            <div className="origin-top w-full max-w-2xl scale-[0.7] sm:scale-[0.78] md:scale-[0.88] lg:scale-[0.95] xl:scale-100">
+              <div className="bg-white rounded-[2rem] shadow-2xl w-full overflow-hidden border border-white/20 relative">
             
-            <div className="bg-slate-900 p-8 text-white relative overflow-hidden">
+            <div className="bg-slate-900 p-6 text-white relative overflow-hidden">
               <div className="absolute top-0 right-0 w-64 h-64 bg-indigo-500/30 rounded-full blur-[50px] -translate-y-1/2 translate-x-1/3"></div>
               <div className="relative z-10 flex justify-between items-start">
                 <div>
@@ -439,7 +907,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
               </div>
             </div>
 
-            <div className="p-8 grid grid-cols-2 gap-y-6 gap-x-8">
+            <div className="p-6 grid grid-cols-2 gap-y-4 gap-x-6">
               <div>
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Phone & Email</p>
                 <p className="font-bold text-slate-800">{viewingStudent.phone}</p>
@@ -459,7 +927,9 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                 <div className="relative z-10 text-right">
                   <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">Breakdown</p>
                   <p className="font-bold text-slate-800 text-sm">Deposit: ₹{viewingStudent.security_deposit || 0}</p>
-                  <p className="font-bold text-slate-800 text-sm">Rent: ₹{viewingStudent.advance_rent || 0}</p>
+                  <p className="font-bold text-slate-800 text-sm">Advance Rent/bed: ₹{viewingStudent.advance_rent || 0}</p>
+                  <p className="font-bold text-slate-800 text-sm">initial Meter Unit : {viewingStudent.electricity_units || 0}</p>
+                  <p className="font-bold text-slate-800 text-sm">Rs/Unit: ₹{viewingStudent.electricity_rate_per_unit || 0}</p>
                 </div>
               </div>
 
@@ -476,6 +946,16 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
               <div className="col-span-1">
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Food & Diet</p>
                 <p className="font-bold text-emerald-600 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-100 inline-block mt-1">{viewingStudent.food_preference}</p>
+                <div className="mt-5">
+                  <Link
+                    href={`/students?view=${viewingStudent.id}&qr=${viewingStudent.id}`}
+                    className="h-20 w-20 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center shadow-lg transition-all hover:scale-105"
+                    title="Student Login Barcode"
+                  >
+                    <span className="text-3xl leading-none">⌁</span>
+                  </Link>
+                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-2">Student Login Barcode</p>
+                </div>
               </div>
               <div className="col-span-2">
                 <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Home Address</p>
@@ -483,6 +963,54 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
               </div>
             </div>
 
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* LOGIN QR CARD MODAL */}
+      {qrStudent && (
+        <div className="fixed inset-0 bg-slate-900/75 backdrop-blur-md z-[60] flex justify-center items-start p-2 sm:p-3 overflow-hidden">
+          <div className="w-full flex justify-center">
+            <div className="origin-top w-full max-w-xl scale-[0.76] sm:scale-[0.86] md:scale-[0.94] lg:scale-100">
+              <div className="bg-white rounded-[2rem] shadow-2xl w-full overflow-hidden border border-white/20">
+            <div className="bg-indigo-600 p-6 flex justify-between items-start text-white">
+              <div>
+                <h3 className="text-2xl font-black tracking-tight">Student Login Barcode</h3>
+                <p className="text-indigo-200 text-sm mt-1 font-medium">Print and hand this to the student.</p>
+              </div>
+              <Link href={viewId ? `/students?view=${viewId}` : '/students'} className="w-10 h-10 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center text-xl transition-colors backdrop-blur-md">✕</Link>
+            </div>
+
+            <div className="p-8">
+              <div className="rounded-2xl border border-slate-200 bg-slate-50 p-6">
+                <p className="text-lg font-black text-slate-800">{qrStudent.full_name}</p>
+                <p className="text-xs text-slate-500 font-bold uppercase tracking-widest mt-1">Portal Access QR</p>
+
+                <div className="mt-6 flex justify-center">
+                  <img
+                    src={`https://quickchart.io/qr?size=260&text=${encodeURIComponent(makeQrPayload(qrStudent.email, qrStudent.phone))}`}
+                    alt="Student login QR"
+                    className="h-[260px] w-[260px] rounded-xl border border-slate-200 bg-white p-2"
+                  />
+                </div>
+
+                <p className="text-[11px] text-slate-500 text-center mt-3">Scan this QR to open Student Portal login directly.</p>
+              </div>
+
+              <div className="mt-6 flex justify-end gap-3">
+                <PrintCardButton />
+                <Link
+                  href={viewId ? `/students?view=${viewId}` : '/students'}
+                  className="px-6 py-3 rounded-xl bg-slate-100 text-slate-700 font-bold text-sm hover:bg-slate-200 transition-colors"
+                >
+                  Close
+                </Link>
+              </div>
+            </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

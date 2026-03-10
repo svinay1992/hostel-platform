@@ -3,6 +3,7 @@ export const dynamic = 'force-dynamic';
 
 import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
+import { addActivityLog } from '../../lib/activity-log-cache';
 
 export default async function HelpdeskPage() {
   
@@ -21,7 +22,15 @@ export default async function HelpdeskPage() {
   async function resolveTicket(formData: FormData) {
     'use server';
     const ticket_id = formData.get('ticket_id') as string;
+    const { data: ticket } = await supabase.from('complaints').select('issue_type').eq('id', ticket_id).single();
     await supabase.from('complaints').update({ status: 'Resolved' }).eq('id', ticket_id);
+    await addActivityLog({
+      module: 'Helpdesk',
+      action: 'Ticket Resolved',
+      details: `Ticket #${ticket_id} (${ticket?.issue_type || 'Issue'}) marked resolved`,
+      actor: 'admin',
+      level: 'info',
+    });
     revalidatePath('/helpdesk');
     revalidatePath('/'); 
   }
@@ -30,7 +39,15 @@ export default async function HelpdeskPage() {
   async function deleteTicket(formData: FormData) {
     'use server';
     const ticket_id = formData.get('ticket_id') as string;
+    const { data: ticket } = await supabase.from('complaints').select('issue_type').eq('id', ticket_id).single();
     await supabase.from('complaints').delete().eq('id', ticket_id);
+    await addActivityLog({
+      module: 'Helpdesk',
+      action: 'Ticket Deleted',
+      details: `Ticket #${ticket_id} (${ticket?.issue_type || 'Issue'}) deleted`,
+      actor: 'admin',
+      level: 'warning',
+    });
     revalidatePath('/helpdesk');
     revalidatePath('/');
   }

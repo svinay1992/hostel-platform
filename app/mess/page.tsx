@@ -1,5 +1,6 @@
 import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
+import { addActivityLog } from '../../lib/activity-log-cache';
 
 export default async function MessMenuPage() {
   
@@ -21,6 +22,20 @@ export default async function MessMenuPage() {
       .from('mess_menu')
       .update({ breakfast, lunch, dinner })
       .eq('day_of_week', day_of_week);
+
+    // Push a portal-visible notice so students receive live popup notification.
+    await supabase.from('notices').insert([{
+      title: `Mess Menu Updated - ${day_of_week}`,
+      message: `Today's menu changed. Breakfast: ${breakfast}. Lunch: ${lunch}. Dinner: ${dinner}.`,
+      is_urgent: false,
+    }]);
+    await addActivityLog({
+      module: 'Mess',
+      action: 'Menu Updated',
+      details: `${day_of_week}: breakfast/lunch/dinner menu changed`,
+      actor: 'admin',
+      level: 'info',
+    });
 
     revalidatePath('/mess');
     revalidatePath('/portal'); // Instantly pushes the new food to the students!

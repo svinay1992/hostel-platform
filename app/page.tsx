@@ -4,8 +4,54 @@ export const dynamic = 'force-dynamic';
 import { supabase } from '../lib/supabase';
 import Link from 'next/link';
 import AutoRefresh from './_components/auto-refresh';
+import { clearInventoryPurchaseHistory, getInventoryPurchaseHistory } from '../lib/inventory-purchase-cache';
+import { clearInventoryUsageHistory } from '../lib/inventory-usage-cache';
+import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
+import { addActivityLog, getActivityLogs } from '../lib/activity-log-cache';
 
-export default async function MasterDashboard() {
+export default async function MasterDashboard({
+  searchParams,
+}: {
+  searchParams: Promise<{ history?: string }>;
+}) {
+  const resolvedParams = await searchParams;
+  const historyStatus = (resolvedParams?.history || '').toLowerCase();
+
+  async function deleteInventoryHistory(formData: FormData) {
+    'use server';
+    const adminPassword = ((formData.get('admin_password') as string) || '').trim();
+    const scope = ((formData.get('scope') as string) || 'both').trim().toLowerCase();
+
+    if (adminPassword !== 'admin123') {
+      await addActivityLog({
+        module: 'Inventory',
+        action: 'History Delete Denied',
+        details: 'Inventory history delete was blocked due to failed admin verification',
+        actor: 'admin',
+        level: 'warning',
+      });
+      return redirect('/?history=denied');
+    }
+
+    if (scope === 'purchases' || scope === 'both') {
+      await clearInventoryPurchaseHistory();
+    }
+    if (scope === 'usage' || scope === 'both') {
+      await clearInventoryUsageHistory();
+    }
+    await addActivityLog({
+      module: 'Inventory',
+      action: 'History Deleted',
+      details: `Inventory history deleted from dashboard with scope: ${scope}`,
+      actor: 'admin',
+      level: 'critical',
+    });
+
+    revalidatePath('/');
+    revalidatePath('/inventory');
+    redirect('/?history=deleted');
+  }
   
   // 1. FETCH OCCUPANCY STATS (Now securely looking at student_admissions)
   const { count: studentCount } = await supabase
@@ -40,14 +86,25 @@ export default async function MasterDashboard() {
   const pendingDues = pendingInvoices?.reduce((sum, inv) => sum + Number(inv.amount), 0) || 0;
 
   // 4. FETCH EXPENSES
-  const { data: expenses } = await supabase.from('expenses').select('amount');
+  const { data: expenses } = await supabase
+    .from('expenses')
+    .select('amount')
+    .neq('category', 'Inventory Purchase');
   const manualExpenses = expenses?.reduce((sum, exp) => sum + Number(exp.amount), 0) || 0;
 
   const { data: activeStaff } = await supabase.from('staff').select('salary').eq('status', 'Active');
   const totalPayroll = activeStaff?.reduce((sum, staff) => sum + Number(staff.salary), 0) || 0;
 
+  const purchaseHistory = await getInventoryPurchaseHistory();
+  const activityLogs = await getActivityLogs(80);
+  const currentMonthKey = new Date().toISOString().slice(0, 7);
+  const currentMonthInventoryPurchases = purchaseHistory.reduce((sum, entry) => {
+    if ((entry.purchased_at || '').slice(0, 7) !== currentMonthKey) return sum;
+    return sum + Number(entry.total_cost || 0);
+  }, 0);
+
   // GRAND TOTALS
-  const grandTotalExpenses = manualExpenses + totalPayroll;
+  const grandTotalExpenses = manualExpenses + totalPayroll + currentMonthInventoryPurchases;
   const netProfit = totalIncome - grandTotalExpenses;
 
   return (
@@ -64,6 +121,19 @@ export default async function MasterDashboard() {
         <h2 className="text-4xl font-black text-slate-800 tracking-tight">Master Dashboard</h2>
         <p className="text-slate-500 mt-2 font-medium text-lg">Real-time overview of your hostel operations.</p>
       </header>
+
+      {historyStatus && (
+        <div
+          className={`mb-6 rounded-xl px-4 py-3 text-sm font-semibold border ${
+            historyStatus === 'deleted'
+              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+              : 'bg-rose-50 text-rose-700 border-rose-200'
+          }`}
+        >
+          {historyStatus === 'deleted' && 'Inventory history deleted successfully after admin verification.'}
+          {historyStatus === 'denied' && 'Admin verification failed. Inventory history was not deleted.'}
+        </div>
+      )}
 
       {/* TOP ROW */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-12 relative z-10">
@@ -153,6 +223,7 @@ export default async function MasterDashboard() {
                 <div className="flex flex-col gap-1">
                   <span className="flex justify-between gap-4"><span className="text-slate-400">Ledger:</span> <strong>₹{manualExpenses.toLocaleString('en-IN')}</strong></span>
                   <span className="flex justify-between gap-4"><span className="text-slate-400">Payroll:</span> <strong>₹{totalPayroll.toLocaleString('en-IN')}</strong></span>
+                  <span className="flex justify-between gap-4"><span className="text-slate-400">Inventory (This Month):</span> <strong>₹{currentMonthInventoryPurchases.toLocaleString('en-IN')}</strong></span>
                 </div>
               </div>
             </div>
@@ -165,6 +236,89 @@ export default async function MasterDashboard() {
           </div>
         </div>
       </div>
+
+      <section className="relative z-10 mt-10">
+        <div className="bg-white rounded-3xl shadow-sm border border-red-100 p-6 md:p-8 max-w-2xl">
+          <h3 className="text-xl font-black text-slate-800">Delete Inventory History (Admin Verified)</h3>
+          <p className="text-slate-500 text-sm mt-1">
+            This deletes inventory audit history only. Live stock items remain untouched.
+          </p>
+
+          <form action={deleteInventoryHistory} className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Delete Scope</label>
+              <select name="scope" defaultValue="both" className="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-800 bg-white">
+                <option value="both">Purchases + Usage</option>
+                <option value="purchases">Only Purchases</option>
+                <option value="usage">Only Usage</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Admin Password</label>
+              <input
+                type="password"
+                name="admin_password"
+                required
+                placeholder="Admin password"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-slate-800 focus:ring-2 focus:ring-red-500 outline-none"
+              />
+            </div>
+
+            <button type="submit" className="w-full bg-red-600 text-white font-bold py-2.5 rounded-lg hover:bg-red-700 transition-colors shadow-sm">
+              Verify and Delete
+            </button>
+          </form>
+        </div>
+      </section>
+
+      <section className="relative z-10 mt-10">
+        <div className="bg-white rounded-3xl shadow-sm border border-slate-100 overflow-hidden">
+          <div className="p-6 border-b border-slate-100 bg-slate-50/60 flex items-center justify-between">
+            <h3 className="text-xl font-black text-slate-800">Live Notice Board (System Activity)</h3>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Auto refresh: every 4s
+            </span>
+          </div>
+          <div className="max-h-[520px] overflow-y-auto">
+            {activityLogs.length === 0 ? (
+              <p className="p-6 text-sm text-slate-400 italic">No activity recorded yet.</p>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {activityLogs.map((log) => {
+                  const badgeClass =
+                    log.level === 'critical'
+                      ? 'bg-rose-100 text-rose-700'
+                      : log.level === 'warning'
+                        ? 'bg-amber-100 text-amber-700'
+                        : 'bg-emerald-100 text-emerald-700';
+
+                  return (
+                    <li key={log.id} className="px-6 py-4">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`text-[10px] font-extrabold uppercase px-2 py-1 rounded-full ${badgeClass}`}>
+                          {log.level}
+                        </span>
+                        <span className="text-[10px] font-extrabold uppercase px-2 py-1 rounded-full bg-indigo-100 text-indigo-700">
+                          {log.module}
+                        </span>
+                        <span className="text-[10px] font-extrabold uppercase px-2 py-1 rounded-full bg-slate-100 text-slate-700">
+                          {log.actor}
+                        </span>
+                        <span className="text-xs text-slate-400 ml-auto">
+                          {new Date(log.created_at).toLocaleString('en-IN')}
+                        </span>
+                      </div>
+                      <p className="text-sm font-bold text-slate-800 mt-2">{log.action}</p>
+                      <p className="text-sm text-slate-600 mt-1">{log.details}</p>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
+      </section>
     </main>
   );
 }

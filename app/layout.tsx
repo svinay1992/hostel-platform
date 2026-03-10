@@ -3,6 +3,8 @@ import { Inter } from "next/font/google";
 import "./globals.css";
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+import PopupNotifier from './_components/popup-notifier';
+import { addActivityLog } from '../lib/activity-log-cache';
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -20,6 +22,13 @@ export default function RootLayout({
   // THE NEW SECURE LOGOUT ACTION FOR THE ADMIN
   async function handleAdminLogout() {
     'use server';
+    await addActivityLog({
+      module: 'Admin Auth',
+      action: 'Admin Logout',
+      details: 'Admin signed out from control panel',
+      actor: 'admin',
+      level: 'info',
+    });
     const cookieStore = await cookies();
     cookieStore.delete('hmp_access_token');
     redirect('/login');
@@ -27,10 +36,10 @@ export default function RootLayout({
 
   return (
     <html lang="en">
-      <body className={`${inter.className} flex h-screen bg-gray-50 font-sans`}>
+      <body suppressHydrationWarning className={`${inter.className} flex h-screen overflow-hidden bg-gray-50 font-sans`}>
         
         {/* THE GLOBAL SIDEBAR */}
-        <aside className="w-64 bg-white border-r shadow-sm flex flex-col">
+        <aside className="w-64 shrink-0 bg-white border-r shadow-sm flex flex-col">
           <div className="p-6 border-b">
             <h1 className="text-2xl font-extrabold text-indigo-600 tracking-tight">HMP Admin</h1>
           </div>
@@ -60,6 +69,7 @@ export default function RootLayout({
 
         {/* PAGE CONTENT CONTEXT */}
         {children}
+        <PopupNotifier mode="admin-ticket" />
 
       </body>
     </html>

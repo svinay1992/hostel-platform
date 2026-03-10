@@ -6,6 +6,11 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { revalidatePath } from 'next/cache';
 import AutoRefresh from '../_components/auto-refresh';
+import PopupNotifier from '../_components/popup-notifier';
+import { resolveInvoiceBreakdown } from '../../lib/billing-breakdown';
+import { getBreakdownNotes } from '../../lib/invoice-breakdown-cache';
+import { getPaidAtMap } from '../../lib/invoice-paid-at-cache';
+import { addActivityLog } from '../../lib/activity-log-cache';
 
 export default async function StudentPortalDashboard() {
   
@@ -37,6 +42,14 @@ export default async function StudentPortalDashboard() {
     .select('*')
     .eq('student_id', studentId)
     .order('due_date', { ascending: false });
+  const typedMyInvoices = (myInvoices || []) as Array<{ id: number; additional_notes?: string | null; status?: string | null }>;
+  const breakdownNotesByInvoiceId = await getBreakdownNotes(typedMyInvoices.map((inv) => inv.id));
+  const paidAtByInvoiceId = await getPaidAtMap(typedMyInvoices.map((inv) => inv.id));
+
+  const visibleInvoices = typedMyInvoices.filter((inv: any) => {
+    const normalizedStatus = (inv.status || '').toString().trim().toLowerCase();
+    return normalizedStatus === 'pending' || normalizedStatus === 'paid';
+  });
 
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const todayMenuDay = days[new Date().getDay()]; 
@@ -53,9 +66,94 @@ export default async function StudentPortalDashboard() {
     .order('created_at', { ascending: false })
     .limit(5);
 
+  const normalizedEmail = (student.email || '').trim().toLowerCase();
+  const phoneDigits = (student.phone || '').toString().replace(/\D+/g, '');
+
+  let legacyStudentIdForNotifications: number | null = null;
+
+  if (normalizedEmail) {
+    const { data: existingPortalUsers } = await supabase
+      .from('users')
+      .select('id')
+      .ilike('email', normalizedEmail)
+      .order('id', { ascending: false })
+      .limit(1);
+
+    const portalUserId = existingPortalUsers?.[0]?.id || null;
+
+    if (portalUserId) {
+      const { data: existingLegacyStudent } = await supabase
+        .from('students')
+        .select('id')
+        .eq('user_id', portalUserId)
+        .maybeSingle();
+
+      legacyStudentIdForNotifications = existingLegacyStudent?.id || null;
+    }
+  }
+
+  if (!legacyStudentIdForNotifications && phoneDigits) {
+    const { data: fallbackLegacyStudent } = await supabase
+      .from('students')
+      .select('id')
+      .ilike('phone_number', `%${phoneDigits}%`)
+      .order('id', { ascending: false })
+      .limit(1);
+
+    legacyStudentIdForNotifications = fallbackLegacyStudent?.[0]?.id || null;
+  }
+
+  let myComplaintNotifications: any[] = [];
+
+  if (legacyStudentIdForNotifications) {
+    const { data: myComplaints } = await supabase
+      .from('complaints')
+      .select('*')
+      .eq('student_id', legacyStudentIdForNotifications)
+      .order('id', { ascending: false })
+      .limit(5);
+
+    myComplaintNotifications = myComplaints || [];
+  }
+
+  const combinedNotifications = [
+    ...(notices || []).map((notice: any) => ({
+      id: `notice-${notice.id}`,
+      type: 'announcement',
+      level: notice.is_urgent ? 'urgent' : 'info',
+      title: notice.title,
+      message: notice.message,
+      created_at: notice.created_at,
+      created_id: notice.id || 0,
+    })),
+    ...myComplaintNotifications.map((ticket: any) => ({
+      id: `ticket-${ticket.id}`,
+      type: 'ticket',
+      level: (ticket.status || '').toLowerCase() === 'resolved' ? 'resolved' : 'open',
+      title: `Ticket ${ticket.status || 'Open'}: ${ticket.issue_type || 'Support Request'}`,
+      message: ticket.description,
+      created_at: ticket.created_at || null,
+      created_id: ticket.id || 0,
+    })),
+  ]
+    .sort((a: any, b: any) => {
+      const aDate = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const bDate = b.created_at ? new Date(b.created_at).getTime() : 0;
+      if (bDate !== aDate) return bDate - aDate;
+      return Number(b.created_id || 0) - Number(a.created_id || 0);
+    })
+    .slice(0, 8);
+
   // Actions
   async function handleLogout() {
     'use server';
+    await addActivityLog({
+      module: 'Portal',
+      action: 'Student Logout',
+      details: `${student.full_name || 'Student'} logged out from portal`,
+      actor: 'student',
+      level: 'info',
+    });
     const cookieStore = await cookies();
     cookieStore.delete('hmp_student_token');
     redirect('/portal-login');
@@ -65,8 +163,6 @@ export default async function StudentPortalDashboard() {
     'use server';
     const issueType = (formData.get('issue_type') as string)?.trim();
     const description = (formData.get('description') as string)?.trim();
-    const normalizedEmail = (student.email || '').trim().toLowerCase();
-    const phoneDigits = (student.phone || '').toString().replace(/\D+/g, '');
 
     if (!issueType || !description || !normalizedEmail) return;
     
@@ -152,6 +248,14 @@ export default async function StudentPortalDashboard() {
 
       if (complaintError) {
         console.error('COMPLAINT INSERT ERROR:', complaintError.message);
+      } else {
+        await addActivityLog({
+          module: 'Portal',
+          action: 'Complaint Submitted',
+          details: `${student.full_name || 'Student'} raised ${issueType} complaint`,
+          actor: 'student',
+          level: 'warning',
+        });
       }
     } else {
       console.error('COMPLAINT LINK ERROR: No legacy student mapping found for', normalizedEmail);
@@ -165,6 +269,7 @@ export default async function StudentPortalDashboard() {
   return (
     <div className="fixed top-0 left-0 w-full h-full z-[9999] bg-[#F1F5F9] font-sans flex flex-col overflow-y-auto m-0 text-slate-900">
       <AutoRefresh intervalMs={4000} />
+      <PopupNotifier mode="student-portal" studentId={Number(studentId)} />
       
       {/* Subtle modern background gradient */}
       <div className="fixed inset-0 -z-10 bg-[radial-gradient(45%_40%_at_50%_50%,rgba(99,102,241,0.05)_0%,transparent_100%)]"></div>
@@ -236,7 +341,7 @@ export default async function StudentPortalDashboard() {
              <h3 className="text-4xl font-black text-slate-900">₹{student.total_paid || 0}</h3>
              <div className="mt-4 flex gap-4">
                 <div className="text-[10px] font-bold text-slate-400 uppercase">Deposit: <span className="text-slate-700">₹{student.security_deposit}</span></div>
-                <div className="text-[10px] font-bold text-slate-400 uppercase">Advance: <span className="text-slate-700">₹{student.advance_rent}</span></div>
+                <div className="text-[10px] font-bold text-slate-400 uppercase">Advance Rent/bed: <span className="text-slate-700">₹{student.advance_rent}</span></div>
              </div>
           </div>
 
@@ -261,7 +366,7 @@ export default async function StudentPortalDashboard() {
             <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm overflow-hidden">
               <div className="px-8 py-6 border-b border-slate-100 flex justify-between items-center">
                 <h3 className="text-xl font-black text-slate-900">Payment History</h3>
-                <span className="text-xs font-bold text-slate-400">{myInvoices?.length || 0} Records</span>
+                <span className="text-xs font-bold text-slate-400">{visibleInvoices.length || 0} Records</span>
               </div>
               <div className="p-2 overflow-x-auto">
                 <table className="w-full">
@@ -269,20 +374,58 @@ export default async function StudentPortalDashboard() {
                     <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
                       <th className="px-6 py-4 text-left">Bill Details</th>
                       <th className="px-6 py-4 text-left">Due Date</th>
+                      <th className="px-6 py-4 text-left">Paid Date and Time</th>
                       <th className="px-6 py-4 text-right">Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-50">
-                    {myInvoices?.map((inv: any) => (
+                    {visibleInvoices.map((inv: any) => {
+                      const invWithCachedNotes = {
+                        ...inv,
+                        additional_notes: breakdownNotesByInvoiceId[inv.id] || inv.additional_notes || null,
+                        paid_at: inv.paid_at || paidAtByInvoiceId[inv.id] || null,
+                      };
+                      const breakdown = resolveInvoiceBreakdown(invWithCachedNotes, Number(inv.amount ?? 0));
+                      return (
                       <tr key={inv.id} className="hover:bg-slate-50/50 transition-colors group">
                         <td className="px-6 py-5">
                           <p className="text-lg font-black text-slate-800">₹{Number(inv.amount).toLocaleString('en-IN')}</p>
-                          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Monthly Rent</p>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1">Final Monthly Bill</p>
+                          <div className="mt-2 text-[11px] text-slate-500 space-y-1">
+                            <p>Rent: ₹{Number(breakdown.baseRent ?? inv.amount ?? 0).toLocaleString('en-IN')}</p>
+                            <p>Electricity: ₹{Number(breakdown.electricityAmount ?? 0).toLocaleString('en-IN')}</p>
+                            {(breakdown.services || []).map((service: any, idx: number) => (
+                              <p key={`portal-service-${inv.id}-${idx}`}>
+                                Service: {service.name || `Service ${idx + 1}`} (₹{Number(service.amount ?? 0).toLocaleString('en-IN')})
+                              </p>
+                            ))}
+                            <p>Service Total: ₹{Number(breakdown.customServiceAmount ?? 0).toLocaleString('en-IN')}</p>
+                          </div>
                         </td>
                         <td className="px-6 py-5">
                           <p className="text-sm font-bold text-slate-600">
                             {new Date(inv.due_date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' })}
                           </p>
+                        </td>
+                        <td className="px-6 py-5">
+                          {invWithCachedNotes.paid_at ? (
+                            <>
+                              <p className="text-sm font-bold text-slate-700">{new Date(invWithCachedNotes.paid_at).toLocaleString('en-IN')}</p>
+                              {(() => {
+                                const due = new Date(inv.due_date);
+                                const paid = new Date(invWithCachedNotes.paid_at);
+                                due.setHours(0, 0, 0, 0);
+                                paid.setHours(0, 0, 0, 0);
+                                const diffDays = Math.floor((paid.getTime() - due.getTime()) / (1000 * 60 * 60 * 24));
+                                if (diffDays > 0) {
+                                  return <p className="text-xs font-bold text-rose-600 mt-1">Delayed by {diffDays} day(s)</p>;
+                                }
+                                return <p className="text-xs font-bold text-emerald-600 mt-1">Paid on time</p>;
+                              })()}
+                            </>
+                          ) : (
+                            <p className="text-sm font-bold text-slate-400">Not paid</p>
+                          )}
                         </td>
                         <td className="px-6 py-5 text-right">
                           <span className={`inline-flex px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest ${
@@ -292,9 +435,10 @@ export default async function StudentPortalDashboard() {
                           </span>
                         </td>
                       </tr>
-                    ))}
-                    {(!myInvoices || myInvoices.length === 0) && (
-                      <tr><td colSpan={3} className="px-6 py-12 text-center text-slate-400 font-medium italic text-sm">No billing data found.</td></tr>
+                      );
+                    })}
+                    {visibleInvoices.length === 0 && (
+                      <tr><td colSpan={4} className="px-6 py-12 text-center text-slate-400 font-medium italic text-sm">No finalized billing data found.</td></tr>
                     )}
                   </tbody>
                 </table>
@@ -342,7 +486,8 @@ export default async function StudentPortalDashboard() {
                     <option value="Electrical">⚡ Electrical</option>
                     <option value="Plumbing">🚰 Plumbing</option>
                     <option value="Carpentry">🚪 Carpentry</option>
-                    <option value="Other">❓ Other</option>
+                    <option value="Other" >🏥 Medical</option>
+                    <option value="Other">❓Other</option>
                   </select>
                 </div>
                 
@@ -367,6 +512,7 @@ export default async function StudentPortalDashboard() {
                          {notice.is_urgent ? 'Critical Notice' : 'Information'}
                        </p>
                        <p className="text-sm font-bold text-slate-800 leading-snug group-hover:text-indigo-600 transition-colors">{notice.title}</p>
+                       <p className="text-xs text-slate-500 mt-1 leading-relaxed whitespace-pre-wrap">{notice.message}</p>
                        <p className="text-xs text-slate-400 mt-2">
                          {new Date(notice.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
                        </p>
@@ -374,6 +520,45 @@ export default async function StudentPortalDashboard() {
                   ))}
                   {(!notices || notices.length === 0) && (
                     <p className="text-sm text-slate-400 italic">No announcements found.</p>
+                  )}
+               </div>
+            </div>
+
+            {/* NOTIFICATIONS */}
+            <div className="bg-white rounded-[2rem] border border-slate-200/60 shadow-sm p-8">
+               <h3 className="text-lg font-black text-slate-900 mb-6">Notifications</h3>
+               <div className="space-y-4">
+                  {combinedNotifications.map((item: any) => {
+                    const isUrgent = item.level === 'urgent';
+                    const isResolved = item.level === 'resolved';
+                    const accentClass = isUrgent
+                      ? 'border-rose-500'
+                      : isResolved
+                        ? 'border-emerald-500'
+                        : 'border-indigo-500';
+                    const label = item.type === 'ticket'
+                      ? (isResolved ? 'Ticket Update' : 'Ticket Created')
+                      : 'Announcement';
+
+                    return (
+                      <div key={item.id} className={`relative pl-4 border-l-2 ${accentClass}`}>
+                        <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${
+                          isUrgent ? 'text-rose-500' : isResolved ? 'text-emerald-600' : 'text-indigo-500'
+                        }`}>
+                          {label}
+                        </p>
+                        <p className="text-sm font-bold text-slate-800 leading-snug">{item.title}</p>
+                        <p className="text-xs text-slate-500 mt-1 leading-relaxed whitespace-pre-wrap">{item.message}</p>
+                        <p className="text-xs text-slate-400 mt-2">
+                          {item.created_at
+                            ? new Date(item.created_at).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })
+                            : 'Recent'}
+                        </p>
+                      </div>
+                    );
+                  })}
+                  {combinedNotifications.length === 0 && (
+                    <p className="text-sm text-slate-400 italic">No notifications yet.</p>
                   )}
                </div>
             </div>

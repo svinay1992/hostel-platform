@@ -1,5 +1,6 @@
 import { supabase } from '../../lib/supabase';
 import { revalidatePath } from 'next/cache';
+import { addActivityLog } from '../../lib/activity-log-cache';
 
 export default async function AnnouncementsPage() {
   
@@ -21,6 +22,13 @@ export default async function AnnouncementsPage() {
       message,
       is_urgent
     }]);
+    await addActivityLog({
+      module: 'Announcements',
+      action: 'Notice Published',
+      details: `${title}${is_urgent ? ' [URGENT]' : ''}`,
+      actor: 'admin',
+      level: is_urgent ? 'warning' : 'info',
+    });
 
     revalidatePath('/announcements');
     revalidatePath('/portal'); // Instantly updates the student portal too!
@@ -30,8 +38,17 @@ export default async function AnnouncementsPage() {
   async function deleteNotice(formData: FormData) {
     'use server';
     const id = formData.get('id') as string;
+    const { data: notice } = await supabase.from('notices').select('title').eq('id', id).single();
     await supabase.from('notices').delete().eq('id', id);
+    await addActivityLog({
+      module: 'Announcements',
+      action: 'Notice Deleted',
+      details: `${notice?.title || `Notice #${id}`} removed`,
+      actor: 'admin',
+      level: 'warning',
+    });
     revalidatePath('/announcements');
+    revalidatePath('/portal');
   }
 
   return (

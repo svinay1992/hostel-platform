@@ -1,10 +1,17 @@
 export const dynamic = 'force-dynamic';
 
 import { loginStudent } from './actions';
+import PortalLoginScanner from '../_components/portal-login-scanner';
 
-export default async function PortalLogin({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+export default async function PortalLogin({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string; email?: string; password?: string }>;
+}) {
   const resolvedParams = await searchParams;
   const errorMessage = resolvedParams?.error;
+  const prefilledEmail = resolvedParams?.email || '';
+  const prefilledPassword = resolvedParams?.password || '';
 
   return (
     <div className="fixed top-0 left-0 w-[100vw] h-[100vh] z-[9999] bg-[#F4F7FF] flex items-center justify-center font-sans p-4 overflow-y-auto m-0">
@@ -14,6 +21,7 @@ export default async function PortalLogin({ searchParams }: { searchParams: Prom
       </div>
 
       <div className="w-full max-w-md bg-white rounded-2xl shadow-xl shadow-indigo-100/50 p-10 border border-slate-100 relative z-10">
+        <PortalLoginScanner />
         <h1 className="text-2xl font-black text-indigo-700 tracking-tight text-center mb-1">Student Portal</h1>
         <p className="text-sm font-medium text-slate-500 text-center mb-8">Log in with your registered details</p>
 
@@ -29,8 +37,10 @@ export default async function PortalLogin({ searchParams }: { searchParams: Prom
             <input
               type="email"
               name="email"
+              id="student-login-email"
               required
               placeholder="student@example.com"
+              defaultValue={prefilledEmail}
               className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3.5 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
             />
           </div>
@@ -40,9 +50,26 @@ export default async function PortalLogin({ searchParams }: { searchParams: Prom
             <input
               type="password"
               name="password"
+              id="student-login-password"
               required
               placeholder="9876543210"
+              defaultValue={prefilledPassword}
               className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3.5 text-sm text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all tracking-widest"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-600 mb-2">4-Digit Authentication PIN</label>
+            <input
+              type="password"
+              name="pin"
+              inputMode="numeric"
+              pattern="[0-9]{4}"
+              minLength={4}
+              maxLength={4}
+              required
+              placeholder="Last 4 digits of mobile"
+              className="w-full bg-white border border-slate-300 rounded-lg px-4 py-3.5 text-sm text-slate-900 font-bold focus:ring-2 focus:ring-indigo-500 outline-none transition-all tracking-[0.35em]"
             />
           </div>
 
