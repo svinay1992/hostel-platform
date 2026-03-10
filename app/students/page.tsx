@@ -11,6 +11,11 @@ import {
   removeStudentElectricityData,
   setStudentElectricityData
 } from '../../lib/student-electricity-cache';
+import {
+  getStudentMaintenanceMap,
+  removeStudentMaintenanceData,
+  setStudentMaintenanceData
+} from '../../lib/student-maintenance-cache';
 import { addActivityLog } from '../../lib/activity-log-cache';
 
 function isValidEmail(email: string) {
@@ -46,15 +51,23 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
   const studentElectricityMap = await getStudentElectricityMap(
     (students || []).map((student: any) => Number(student.id)).filter((id: number) => Number.isFinite(id))
   );
+  const studentMaintenanceMap = await getStudentMaintenanceMap(
+    (students || []).map((student: any) => Number(student.id)).filter((id: number) => Number.isFinite(id))
+  );
   const studentsWithElectricity = (students || []).map((student: any) => {
     const cached = studentElectricityMap[Number(student.id)];
     const units = Number(student.electricity_units ?? 0);
     const rate = Number(student.electricity_rate_per_unit ?? 0);
+    const maintenanceCached = studentMaintenanceMap[Number(student.id)];
+    const maintenanceDeposit = Number(student.maintenance_deposit ?? 0);
+    const maintenanceDepositDate = student.maintenance_deposit_date ?? null;
 
     return {
       ...student,
       electricity_units: units > 0 ? units : Number(cached?.units ?? 0),
       electricity_rate_per_unit: rate > 0 ? rate : Number(cached?.ratePerUnit ?? 0),
+      maintenance_deposit: maintenanceDeposit > 0 ? maintenanceDeposit : Number(maintenanceCached?.deposit ?? 0),
+      maintenance_deposit_date: maintenanceDepositDate || maintenanceCached?.depositDate || null,
     };
   });
 
@@ -140,6 +153,9 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
     const rent_date = ar_date ? ar_date : null;
     const electricity_units = Number((formData.get('electricity_units') as string) || 0);
     const electricity_rate_per_unit = Number((formData.get('electricity_rate_per_unit') as string) || 0);
+    const maintenance_deposit = Number((formData.get('maintenance_deposit') as string) || 0);
+    const md_date = formData.get('maintenance_deposit_date') as string;
+    const maintenance_deposit_date = md_date ? md_date : null;
 
     if (!Number.isFinite(security_deposit) || security_deposit < 0 || security_deposit > 5000000) {
       return redirect('/students?add=true&error=invalid_security_deposit');
@@ -152,6 +168,9 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
     }
     if (!Number.isFinite(electricity_rate_per_unit) || electricity_rate_per_unit < 0 || electricity_rate_per_unit > 10000) {
       return redirect('/students?add=true&error=invalid_electricity_rate');
+    }
+    if (!Number.isFinite(maintenance_deposit) || maintenance_deposit < 0 || maintenance_deposit > 5000000) {
+      return redirect('/students?add=true&error=invalid_maintenance_deposit');
     }
 
     // Bed Allocation Logic
@@ -217,6 +236,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
         food_preference, room_number, bed_number, bed_id,
         security_deposit, deposit_date, advance_rent, rent_date,
         electricity_units, electricity_rate_per_unit,
+        maintenance_deposit, maintenance_deposit_date,
         status: 'ACTIVE'
       };
 
@@ -236,12 +256,16 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
         studentError &&
         (
           studentError.message.includes('electricity_units') ||
-          studentError.message.includes('electricity_rate_per_unit')
+          studentError.message.includes('electricity_rate_per_unit') ||
+          studentError.message.includes('maintenance_deposit') ||
+          studentError.message.includes('maintenance_deposit_date')
         )
       ) {
         const {
           electricity_units: _ignoreUnits,
           electricity_rate_per_unit: _ignoreRate,
+          maintenance_deposit: _ignoreMaintenance,
+          maintenance_deposit_date: _ignoreMaintenanceDate,
           ...legacyStudentInsertPayload
         } = studentInsertPayload;
 
@@ -260,6 +284,11 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
           admittedStudentId,
           Number(electricity_units || 0),
           Number(electricity_rate_per_unit || 0)
+        );
+        await setStudentMaintenanceData(
+          admittedStudentId,
+          Number(maintenance_deposit || 0),
+          maintenance_deposit_date
         );
       }
 
@@ -332,6 +361,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
 
     await supabase.from('student_admissions').update({ status: 'LEFT', bed_id: null, room_number: null, bed_number: null }).eq('id', id);
     await removeStudentElectricityData(Number(id));
+    await removeStudentMaintenanceData(Number(id));
     if (bed_id) {
       await supabase.from('students').update({ bed_id: null }).eq('bed_id', bed_id);
       await supabase.from('beds').update({ is_occupied: false }).eq('id', bed_id);
@@ -472,6 +502,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
 
     await supabase.from('student_admissions').delete().eq('id', id);
     await removeStudentElectricityData(id);
+    await removeStudentMaintenanceData(id);
 
     await addActivityLog({
       module: 'Students',
@@ -703,10 +734,10 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
       {showAddForm && (
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex justify-center items-start p-2 sm:p-3 overflow-hidden">
           <div className="w-full flex justify-center">
-            <div className="origin-top w-full max-w-5xl scale-[0.58] sm:scale-[0.66] md:scale-[0.76] lg:scale-[0.86] xl:scale-[0.94] 2xl:scale-100">
+            <div className="origin-top w-full max-w-5xl scale-[0.48] sm:scale-[0.56] md:scale-[0.64] lg:scale-[0.72] xl:scale-[0.8] 2xl:scale-[0.88]">
               <div className="bg-white rounded-[2rem] shadow-2xl w-full overflow-hidden border border-white/20">
             
-            <div className="bg-indigo-600 p-6 flex justify-between items-center text-white">
+            <div className="bg-indigo-600 p-4 flex justify-between items-center text-white">
               <div>
                 <h3 className="text-2xl font-black tracking-tight">📝 New Student Admission</h3>
                 <p className="text-indigo-200 text-sm mt-1 font-medium">Fill in all details to secure a bed.</p>
@@ -714,7 +745,7 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
               <Link href="/students" className="w-10 h-10 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center text-xl transition-colors backdrop-blur-md">✕</Link>
             </div>
 
-            <form action={admitStudent} className="p-8">
+            <form action={admitStudent} className="p-5">
               {addError && (
                 <div
                   className={`mb-5 rounded-xl border px-4 py-3 text-sm font-semibold ${
@@ -740,10 +771,11 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                   {addError === 'invalid_advance_rent' && 'Advance rent must be between 0 and 50,00,000.'}
                   {addError === 'invalid_electricity_units' && 'Electricity units must be between 0 and 1,00,000.'}
                   {addError === 'invalid_electricity_rate' && 'Electricity rate must be between 0 and 10,000.'}
+                  {addError === 'invalid_maintenance_deposit' && 'Maintenance deposit must be between 0 and 50,00,000.'}
                   {addError === 'invalid_bed' && 'Selected bed is invalid. Please choose again.'}
                 </div>
               )}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                 
                 {/* PERSONAL INFO */}
                 <div className="flex flex-col gap-4">
@@ -842,16 +874,26 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                   {/* INITIAL PAYMENTS */}
                   <div className="mt-2 pt-4 border-t border-slate-100">
                     <h4 className="font-black text-emerald-700 uppercase tracking-widest text-[10px] mb-3">Initial Payments</h4>
-                    <div className="grid grid-cols-2 gap-3 mb-3">
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Security Deposit</label>
-                        <input type="number" name="security_deposit" min={0} max={5000000} step="0.01" placeholder="₹5000" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Deposit Date</label>
-                        <input type="date" name="deposit_date" defaultValue={new Date().toISOString().slice(0, 10)} className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-emerald-500 outline-none" />
-                      </div>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Security Deposit</label>
+                      <input type="number" name="security_deposit" min={0} max={5000000} step="0.01" placeholder="₹5000" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
                     </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Deposit Date</label>
+                      <input type="date" name="deposit_date" defaultValue={new Date().toISOString().slice(0, 10)} className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-emerald-500 outline-none" />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Maintenance Deposit</label>
+                      <input type="number" name="maintenance_deposit" min={0} max={5000000} step="0.01" placeholder="₹1500" className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium placeholder-slate-400 focus:ring-2 focus:ring-emerald-500 outline-none" />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Maintenance Deposit Date</label>
+                      <input type="date" name="maintenance_deposit_date" defaultValue={new Date().toISOString().slice(0, 10)} className="w-full bg-emerald-50/50 border border-emerald-100 rounded-xl px-3 py-2 text-sm text-slate-900 font-medium focus:ring-2 focus:ring-emerald-500 outline-none" />
+                    </div>
+                  </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div>
                         <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Advance Rent (Monthly Base Rent)</label>
@@ -927,6 +969,8 @@ export default async function StudentsPage({ searchParams }: { searchParams: Pro
                 <div className="relative z-10 text-right">
                   <p className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest mb-1">Breakdown</p>
                   <p className="font-bold text-slate-800 text-sm">Deposit: ₹{viewingStudent.security_deposit || 0}</p>
+                  <p className="font-bold text-slate-800 text-sm">Maintenance Deposit: ₹{viewingStudent.maintenance_deposit || 0}</p>
+                  <p className="font-bold text-slate-800 text-sm">Maintenance Deposit Date: {viewingStudent.maintenance_deposit_date ? new Date(viewingStudent.maintenance_deposit_date).toLocaleDateString('en-IN') : 'N/A'}</p>
                   <p className="font-bold text-slate-800 text-sm">Advance Rent/bed: ₹{viewingStudent.advance_rent || 0}</p>
                   <p className="font-bold text-slate-800 text-sm">initial Meter Unit : {viewingStudent.electricity_units || 0}</p>
                   <p className="font-bold text-slate-800 text-sm">Rs/Unit: ₹{viewingStudent.electricity_rate_per_unit || 0}</p>

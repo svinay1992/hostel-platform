@@ -13,6 +13,8 @@ type BillMeta = {
   services?: BillService[];
   totalAmount: number;
   finalizedAt?: string;
+  meterInitialUnits?: number;
+  meterCurrentUnits?: number;
 };
 
 const META_PREFIX = '[BILL_META]';
@@ -66,6 +68,8 @@ export function parseAdditionalNotes(notes: string | null | undefined) {
       services: normalizeServices(parsed.services),
       totalAmount: toSafeNumber(parsed.totalAmount),
       finalizedAt: parsed.finalizedAt ? String(parsed.finalizedAt) : undefined,
+      meterInitialUnits: toSafeNumber((parsed as { meterInitialUnits?: unknown }).meterInitialUnits),
+      meterCurrentUnits: toSafeNumber((parsed as { meterCurrentUnits?: unknown }).meterCurrentUnits),
     };
   } catch {
     meta = null;

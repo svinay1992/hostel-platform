@@ -6,6 +6,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import FloorWiseRoomMap from '../_components/floor-wise-room-map';
 import { addActivityLog } from '../../lib/activity-log-cache';
+import ClearQueryOnce from '../_components/clear-query-once';
 
 function getOrdinalFloorLabel(floorNumber: number) {
   const suffix = floorNumber % 10 === 1 && floorNumber % 100 !== 11
@@ -19,9 +20,12 @@ function getOrdinalFloorLabel(floorNumber: number) {
   return `${floorNumber}${suffix} Floor`;
 }
 
-export default async function RoomsPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
+export default async function RoomsPage({ searchParams }: { searchParams: Promise<{ error?: string; floor?: string; room?: string }> }) {
   const resolvedParams = await searchParams;
   const roomDeleteBlocked = resolvedParams?.error === 'room_has_students';
+  const roomNumberDuplicate = resolvedParams?.error === 'room_duplicate';
+  const duplicateFloor = resolvedParams?.floor ? String(resolvedParams.floor) : null;
+  const duplicateRoomNumber = resolvedParams?.room ? String(resolvedParams.room) : null;
 
   const { data: rooms, error: fetchError } = await supabase
     .from('rooms')
@@ -56,12 +60,27 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
     const capacity = parseInt(formData.get('capacity') as string);
     const rent = parseFloat(formData.get('rent') as string);
 
+    const normalizedRoomNumber = (room_number || '').trim();
+    const normalizedFloor = (floor || '').trim();
+    if (!normalizedRoomNumber || !normalizedFloor) return;
+
+    const { data: existingRoom } = await supabase
+      .from('rooms')
+      .select('id')
+      .eq('room_number', normalizedRoomNumber)
+      .eq('floor', normalizedFloor)
+      .maybeSingle();
+
+    if (existingRoom?.id) {
+      return redirect(`/rooms?error=room_duplicate&floor=${encodeURIComponent(normalizedFloor)}&room=${encodeURIComponent(normalizedRoomNumber)}`);
+    }
+
     const { data: newRoom, error: roomError } = await supabase
       .from('rooms')
       .insert([
         {
-          room_number,
-          floor,
+          room_number: normalizedRoomNumber,
+          floor: normalizedFloor,
           type: typeValue,
           room_type: typeValue,
           capacity,
@@ -80,7 +99,7 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
       for (let i = 0; i < capacity; i++) {
         bedsToInsert.push({
           room_id: newRoom.id,
-          bed_number: `${room_number}-${letters[i]}`,
+          bed_number: `${normalizedRoomNumber}-${letters[i]}`,
           monthly_rent: rent,
           is_occupied: false,
         });
@@ -89,7 +108,7 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
       await addActivityLog({
         module: 'Rooms',
         action: 'Room Added',
-        details: `Room ${room_number} (${typeValue}) added with ${capacity} bed(s), rent Rs ${rent}/bed`,
+        details: `Room ${normalizedRoomNumber} (${typeValue}) added with ${capacity} bed(s), rent Rs ${rent}/bed`,
         actor: 'admin',
         level: 'info',
       });
@@ -174,7 +193,8 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
   }
 
   return (
-    <main className="flex-1 p-8 lg:p-12 overflow-y-auto bg-[#F8FAFC] h-full font-sans relative">
+    <main className="flex-1 p-8 lg:p-12 overflow-y-auto overflow-x-hidden bg-[#F8FAFC] h-full font-sans relative">
+      <ClearQueryOnce shouldClear={roomNumberDuplicate} delayMs={6000} />
       <div className="absolute top-0 left-0 w-full h-96 overflow-hidden -z-10 pointer-events-none">
         <div className="absolute -top-24 -left-24 w-96 h-96 bg-indigo-200/40 rounded-full blur-3xl mix-blend-multiply opacity-70"></div>
       </div>
@@ -219,6 +239,11 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
                   placeholder="e.g. 101"
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
                 />
+                {roomNumberDuplicate && (
+                  <div className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] font-black uppercase tracking-wider text-amber-700 shadow-sm">
+                    Room number already exists on this floor. Please provide another room number.
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-4">
@@ -276,7 +301,13 @@ export default async function RoomsPage({ searchParams }: { searchParams: Promis
           </div>
         </div>
 
-        <FloorWiseRoomMap rooms={rooms || []} onDeleteRoom={deleteRoom} onDeleteBed={deleteSingleBed} />
+        <FloorWiseRoomMap
+          rooms={rooms || []}
+          onDeleteRoom={deleteRoom}
+          onDeleteBed={deleteSingleBed}
+          highlightFloor={duplicateFloor}
+          highlightRoomNumber={duplicateRoomNumber}
+        />
       </div>
     </main>
   );

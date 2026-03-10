@@ -458,6 +458,7 @@ export default async function StudentPortalDashboard() {
                  {[
                    { label: 'Breakfast', val: todaysMenu?.breakfast, color: 'amber' },
                    { label: 'Lunch', val: todaysMenu?.lunch, color: 'sky' },
+                   { label: 'Snacks', val: todaysMenu?.snacks, color: 'emerald' },
                    { label: 'Dinner', val: todaysMenu?.dinner, color: 'indigo' }
                  ].map((item) => (
                    <div key={item.label} className="relative p-6 rounded-2xl bg-slate-50 border border-slate-100 group hover:border-indigo-100 transition-colors">

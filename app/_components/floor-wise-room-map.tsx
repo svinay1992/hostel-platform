@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 type StudentAdmission = {
   id: number;
@@ -40,6 +40,8 @@ type FloorWiseRoomMapProps = {
   rooms: Room[];
   onDeleteRoom: (formData: FormData) => void | Promise<void>;
   onDeleteBed: (formData: FormData) => void | Promise<void>;
+  highlightFloor?: string | null;
+  highlightRoomNumber?: string | null;
 };
 
 function getFloorRank(floor: string) {
@@ -80,11 +82,18 @@ function getRoomNumberStateClasses(occupied: number, total: number) {
   return 'text-orange-500';
 }
 
-export default function FloorWiseRoomMap({ rooms, onDeleteRoom, onDeleteBed }: FloorWiseRoomMapProps) {
+export default function FloorWiseRoomMap({
+  rooms,
+  onDeleteRoom,
+  onDeleteBed,
+  highlightFloor,
+  highlightRoomNumber,
+}: FloorWiseRoomMapProps) {
   const [query, setQuery] = useState('');
   const [expandedFloors, setExpandedFloors] = useState<Record<string, boolean>>({});
   const [activeRoomId, setActiveRoomId] = useState<number | null>(null);
   const roomButtonRefs = useRef<Record<number, HTMLButtonElement | null>>({});
+  const [popupPlacement, setPopupPlacement] = useState<Record<number, 'left' | 'right'>>({});
 
   const grouped = useMemo(() => {
     const map = new Map<string, Room[]>();
@@ -170,6 +179,41 @@ export default function FloorWiseRoomMap({ rooms, onDeleteRoom, onDeleteBed }: F
       }
     }, 80);
   };
+
+  const measurePopupPlacement = (roomId: number, preferred: 'left' | 'right' = 'right') => {
+    const btn = roomButtonRefs.current[roomId];
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const popupWidth = window.innerWidth < 640 ? 320 : 352; // 20rem / 22rem
+    const gap = 16;
+    const fitsRight = rect.right + popupWidth + gap <= window.innerWidth;
+    const fitsLeft = rect.left - popupWidth - gap >= 0;
+    let placement: 'left' | 'right' = preferred;
+    if (preferred === 'right' && !fitsRight && fitsLeft) placement = 'left';
+    if (preferred === 'left' && !fitsLeft && fitsRight) placement = 'right';
+    if (!fitsLeft && !fitsRight) placement = 'right';
+    setPopupPlacement((prev) => (prev[roomId] === placement ? prev : { ...prev, [roomId]: placement }));
+  };
+
+  useEffect(() => {
+    if (!highlightFloor || !highlightRoomNumber) return;
+    const target = rooms.find(
+      (room) =>
+        (room.floor || '').toLowerCase() === highlightFloor.toLowerCase() &&
+        (room.room_number || '').toLowerCase() === highlightRoomNumber.toLowerCase()
+    );
+    if (!target) return;
+    setExpandedFloors((prev) => ({ ...prev, [target.floor || 'Unassigned']: true }));
+    setActiveRoomId(target.id);
+    window.setTimeout(() => {
+      const btn = roomButtonRefs.current[target.id];
+      if (btn) {
+        btn.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+        btn.focus();
+        measurePopupPlacement(target.id, 'right');
+      }
+    }, 120);
+  }, [highlightFloor, highlightRoomNumber, rooms]);
 
   if (!rooms || rooms.length === 0) {
     return (
@@ -261,6 +305,12 @@ export default function FloorWiseRoomMap({ rooms, onDeleteRoom, onDeleteBed }: F
                       const isPinnedOpen = activeRoomId === room.id;
                       const roomStateColor = getRoomNumberStateClasses(roomOcc.occupied, roomOcc.total);
 
+                      const isHighlighted =
+                        highlightFloor &&
+                        highlightRoomNumber &&
+                        (room.floor || '').toLowerCase() === highlightFloor.toLowerCase() &&
+                        (room.room_number || '').toLowerCase() === highlightRoomNumber.toLowerCase();
+
                       return (
                         <div key={room.id} className="relative group hover:z-40">
                           <button
@@ -269,9 +319,12 @@ export default function FloorWiseRoomMap({ rooms, onDeleteRoom, onDeleteBed }: F
                             }}
                             type="button"
                             onClick={() => setActiveRoomId((current) => (current === room.id ? null : room.id))}
+                            onMouseEnter={() => measurePopupPlacement(room.id, 'right')}
                             className={`min-h-[3.2rem] min-w-[3.8rem] rounded-xl border bg-white px-3 py-2 transition-colors ${
                               isPinnedOpen
                                 ? 'border-indigo-400 ring-2 ring-indigo-200'
+                                : isHighlighted
+                                  ? 'border-amber-400 ring-2 ring-amber-200 bg-amber-50/60'
                                 : 'border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50'
                             }`}
                           >
@@ -290,9 +343,9 @@ export default function FloorWiseRoomMap({ rooms, onDeleteRoom, onDeleteBed }: F
                           </button>
 
                           <div
-                            className={`absolute left-0 top-12 z-50 w-[22rem] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl shadow-slate-300/40 transition-opacity ${
+                            className={`absolute top-12 z-50 w-[20rem] sm:w-[22rem] rounded-2xl border border-slate-200 bg-white p-4 shadow-xl shadow-slate-300/40 transition-opacity ${
                               isPinnedOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'
-                            }`}
+                            } ${popupPlacement[room.id] === 'left' ? 'right-0' : 'left-0'}`}
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div>

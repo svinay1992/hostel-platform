@@ -16,23 +16,24 @@ export default async function MessMenuPage() {
     const day_of_week = formData.get('day_of_week') as string;
     const breakfast = formData.get('breakfast') as string;
     const lunch = formData.get('lunch') as string;
+    const snacks = formData.get('snacks') as string;
     const dinner = formData.get('dinner') as string;
 
     await supabase
       .from('mess_menu')
-      .update({ breakfast, lunch, dinner })
+      .update({ breakfast, lunch, snacks, dinner })
       .eq('day_of_week', day_of_week);
 
     // Push a portal-visible notice so students receive live popup notification.
     await supabase.from('notices').insert([{
       title: `Mess Menu Updated - ${day_of_week}`,
-      message: `Today's menu changed. Breakfast: ${breakfast}. Lunch: ${lunch}. Dinner: ${dinner}.`,
+      message: `Today's menu changed. Breakfast: ${breakfast}. Lunch: ${lunch}. Snacks: ${snacks}. Dinner: ${dinner}.`,
       is_urgent: false,
     }]);
     await addActivityLog({
       module: 'Mess',
       action: 'Menu Updated',
-      details: `${day_of_week}: breakfast/lunch/dinner menu changed`,
+      details: `${day_of_week}: breakfast/lunch/snacks/dinner menu changed`,
       actor: 'admin',
       level: 'info',
     });
@@ -79,6 +80,11 @@ export default async function MessMenuPage() {
             </div>
 
             <div>
+              <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Snacks</label>
+              <input type="text" name="snacks" required placeholder="e.g. Samosa & Tea" className="w-full border border-gray-300 rounded-lg px-4 py-3 text-gray-800 focus:ring-2 focus:ring-emerald-400 outline-none" />
+            </div>
+
+            <div>
               <label className="block text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Dinner</label>
               <input type="text" name="dinner" required placeholder="e.g. Paneer Butter Masala" className="w-full border border-gray-300 rounded-lg px-4 py-3 text-gray-800 focus:ring-2 focus:ring-indigo-400 outline-none" />
             </div>
@@ -102,6 +108,7 @@ export default async function MessMenuPage() {
                     <th className="p-5">Day</th>
                     <th className="p-5 text-orange-600">Breakfast</th>
                     <th className="p-5 text-blue-600">Lunch</th>
+                    <th className="p-5 text-emerald-600">Snacks</th>
                     <th className="p-5 text-indigo-600">Dinner</th>
                   </tr>
                 </thead>
@@ -111,6 +118,7 @@ export default async function MessMenuPage() {
                       <td className="p-5 font-extrabold text-gray-900">{item.day_of_week}</td>
                       <td className="p-5 font-medium text-gray-700 bg-orange-50/30">{item.breakfast}</td>
                       <td className="p-5 font-medium text-gray-700 bg-blue-50/30">{item.lunch}</td>
+                      <td className="p-5 font-medium text-gray-700 bg-emerald-50/30">{item.snacks}</td>
                       <td className="p-5 font-medium text-gray-700 bg-indigo-50/30">{item.dinner}</td>
                     </tr>
                   ))}

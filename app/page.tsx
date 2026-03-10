@@ -97,6 +97,10 @@ export default async function MasterDashboard({
 
   const purchaseHistory = await getInventoryPurchaseHistory();
   const activityLogs = await getActivityLogs(80);
+  const activityLogsWithLabel = activityLogs.map((log) => ({
+    ...log,
+    created_at_label: new Date(log.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+  }));
   const currentMonthKey = new Date().toISOString().slice(0, 7);
   const currentMonthInventoryPurchases = purchaseHistory.reduce((sum, entry) => {
     if ((entry.purchased_at || '').slice(0, 7) !== currentMonthKey) return sum;
@@ -281,11 +285,11 @@ export default async function MasterDashboard({
             </span>
           </div>
           <div className="max-h-[520px] overflow-y-auto">
-            {activityLogs.length === 0 ? (
-              <p className="p-6 text-sm text-slate-400 italic">No activity recorded yet.</p>
-            ) : (
-              <ul className="divide-y divide-slate-100">
-                {activityLogs.map((log) => {
+            <ul className="divide-y divide-slate-100">
+              {activityLogsWithLabel.length === 0 ? (
+                <li className="p-6 text-sm text-slate-400 italic">No activity recorded yet.</li>
+              ) : (
+                activityLogsWithLabel.map((log) => {
                   const badgeClass =
                     log.level === 'critical'
                       ? 'bg-rose-100 text-rose-700'
@@ -306,16 +310,16 @@ export default async function MasterDashboard({
                           {log.actor}
                         </span>
                         <span className="text-xs text-slate-400 ml-auto">
-                          {new Date(log.created_at).toLocaleString('en-IN')}
+                          {log.created_at_label}
                         </span>
                       </div>
                       <p className="text-sm font-bold text-slate-800 mt-2">{log.action}</p>
                       <p className="text-sm text-slate-600 mt-1">{log.details}</p>
                     </li>
                   );
-                })}
-              </ul>
-            )}
+                })
+              )}
+            </ul>
           </div>
         </div>
       </section>

@@ -13,8 +13,9 @@ type FinanceDraftRowProps = {
   billMonthLabel: string;
   baseRent: number;
   dueDateLabel: string;
-  initialElectricityUnits: number;
+  initialMeterUnits: number;
   initialElectricityRate: number;
+  initialCurrentMeterUnits: number;
   initialCustomServices: CustomService[];
   additionalNotes: string;
   finalizeBillAction: (formData: FormData) => void | Promise<void>;
@@ -27,14 +28,16 @@ export default function FinanceDraftRow({
   billMonthLabel,
   baseRent,
   dueDateLabel,
-  initialElectricityUnits,
+  initialMeterUnits,
   initialElectricityRate,
+  initialCurrentMeterUnits,
   initialCustomServices,
   additionalNotes,
   finalizeBillAction,
   deleteInvoiceAction,
 }: FinanceDraftRowProps) {
-  const [electricityUnits, setElectricityUnits] = useState(initialElectricityUnits);
+  const toInputValue = (value: number) => (value === 0 ? '' : String(value));
+  const [currentMeterUnits, setCurrentMeterUnits] = useState(initialCurrentMeterUnits);
   const [electricityRate, setElectricityRate] = useState(initialElectricityRate);
   const [services, setServices] = useState<CustomService[]>(
     initialCustomServices.length > 0 ? initialCustomServices : [{ name: '', amount: 0 }]
@@ -60,6 +63,10 @@ export default function FinanceDraftRow({
     () => (normalizedServices.length > 0 ? normalizedServices.map((svc) => svc.name || 'Service').join(', ') : ''),
     [normalizedServices]
   );
+  const electricityUnits = useMemo(
+    () => Math.abs(Number((initialMeterUnits - currentMeterUnits).toFixed(2))),
+    [currentMeterUnits, initialMeterUnits]
+  );
   const electricityAmount = useMemo(
     () => Number((electricityUnits * electricityRate).toFixed(2)),
     [electricityRate, electricityUnits]
@@ -80,22 +87,50 @@ export default function FinanceDraftRow({
         </td>
         <td className="p-5 min-w-48">
           <div className="flex flex-col gap-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Initial</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={initialMeterUnits}
+                  disabled
+                  className="w-full rounded border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs font-bold text-slate-500"
+                />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest">Current</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  value={toInputValue(currentMeterUnits)}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    setCurrentMeterUnits(raw === '' ? 0 : Number(raw));
+                  }}
+                  placeholder="Enter current"
+                  className="w-full rounded border border-slate-200 px-2 py-1.5 text-xs font-bold"
+                />
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-slate-500">Units (Initial - Current)</span>
+              <span className="text-xs font-black text-slate-700">{electricityUnits.toLocaleString('en-IN')}</span>
+            </div>
             <div className="flex items-center gap-2">
               <input
                 type="number"
                 step="0.01"
-                value={electricityUnits}
-                onChange={(e) => setElectricityUnits(Number(e.target.value || 0))}
+                value={toInputValue(electricityRate)}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  setElectricityRate(raw === '' ? 0 : Number(raw));
+                }}
                 className="w-16 rounded border border-slate-200 px-2 py-1.5 text-xs font-bold"
               />
-              <span className="text-xs font-bold text-slate-500">units x</span>
-              <input
-                type="number"
-                step="0.01"
-                value={electricityRate}
-                onChange={(e) => setElectricityRate(Number(e.target.value || 0))}
-                className="w-16 rounded border border-slate-200 px-2 py-1.5 text-xs font-bold"
-              />
+              <span className="text-xs font-bold text-slate-500">Rs / unit</span>
             </div>
             <span className="text-[11px] text-slate-500 font-semibold">
               Amount Rs {electricityAmount.toLocaleString('en-IN')}
@@ -120,13 +155,18 @@ export default function FinanceDraftRow({
                 <input
                   type="number"
                   step="0.01"
-                  value={service.amount}
+                  value={toInputValue(service.amount)}
                   onChange={(e) =>
                     setServices((prev) =>
-                      prev.map((entry, i) => (i === index ? { ...entry, amount: Number(e.target.value || 0) } : entry))
+                      prev.map((entry, i) => {
+                        if (i !== index) return entry;
+                        const raw = e.target.value;
+                        return { ...entry, amount: raw === '' ? 0 : Number(raw) };
+                      })
                     )
                   }
                   placeholder="Amount"
+                  onFocus={(e) => e.currentTarget.select()}
                   className="w-24 rounded border border-slate-200 px-2 py-1.5 text-xs font-semibold"
                 />
                 {services.length > 1 && (
@@ -173,6 +213,8 @@ export default function FinanceDraftRow({
               <input type="hidden" name="electricity_units" value={electricityUnits} />
               <input type="hidden" name="electricity_rate" value={electricityRate} />
               <input type="hidden" name="electricity_amount_snapshot" value={electricityAmount} />
+              <input type="hidden" name="initial_meter_units" value={initialMeterUnits} />
+              <input type="hidden" name="current_meter_units" value={currentMeterUnits} />
               <input type="hidden" name="custom_service_name" value={customServiceName} />
               <input type="hidden" name="custom_service_amount" value={customServiceAmount} />
               <input type="hidden" name="custom_services_json" value={JSON.stringify(normalizedServices)} />
@@ -207,7 +249,7 @@ export default function FinanceDraftRow({
 
                 <div className="mt-5 rounded-xl border border-slate-200 bg-slate-50 p-4 space-y-2 text-sm">
                   <div className="flex justify-between"><span>Base Rent</span><strong>Rs {baseRent.toLocaleString('en-IN')}</strong></div>
-                  <div className="flex justify-between"><span>Electricity ({electricityUnits} units x Rs {electricityRate})</span><strong>Rs {electricityAmount.toLocaleString('en-IN')}</strong></div>
+                  <div className="flex justify-between"><span>Electricity ({initialMeterUnits} - {currentMeterUnits} = {electricityUnits} units x Rs {electricityRate})</span><strong>Rs {electricityAmount.toLocaleString('en-IN')}</strong></div>
                   {normalizedServices.length > 0 ? (
                     <>
                       {normalizedServices.map((svc, index) => (

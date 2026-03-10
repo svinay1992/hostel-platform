@@ -10,6 +10,7 @@ import { buildAdditionalNotes, resolveInvoiceBreakdown } from '../../lib/billing
 import { getBreakdownNotes, removeBreakdownNote, setBreakdownNote } from '../../lib/invoice-breakdown-cache';
 import { getPaidAtMap, removePaidAt, setPaidAt } from '../../lib/invoice-paid-at-cache';
 import { addActivityLog } from '../../lib/activity-log-cache';
+import { getStudentElectricityMap, setStudentElectricityData } from '../../lib/student-electricity-cache';
 
 type InvoiceRow = {
   id: number;
@@ -34,6 +35,8 @@ type InvoiceRow = {
     phone: string | null;
     room_number: string | null;
     bed_number: string | null;
+    electricity_units?: number | null;
+    electricity_rate_per_unit?: number | null;
   } | null;
 };
 
@@ -69,12 +72,33 @@ async function maybeGenerateMonthlyDrafts(forceRun = false) {
   const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
   const billingMonth = toDateOnlyISO(nextMonthStart);
 
-  const { data: activeStudents } = await supabase
+  let activeStudents: Array<{
+    id: number;
+    advance_rent?: number | null;
+    electricity_units?: number | null;
+    electricity_rate_per_unit?: number | null;
+  }> = [];
+
+  const { data: studentsWithElectricity, error: studentsWithElectricityError } = await supabase
     .from('student_admissions')
-    .select('id, advance_rent')
+    .select('id, advance_rent, electricity_units, electricity_rate_per_unit')
     .eq('status', 'ACTIVE');
 
+  if (!studentsWithElectricityError && studentsWithElectricity) {
+    activeStudents = studentsWithElectricity as typeof activeStudents;
+  } else {
+    const { data: studentsBasic } = await supabase
+      .from('student_admissions')
+      .select('id, advance_rent')
+      .eq('status', 'ACTIVE');
+    activeStudents = (studentsBasic || []) as typeof activeStudents;
+  }
+
   if (!activeStudents || activeStudents.length === 0) return;
+
+  const electricityCache = await getStudentElectricityMap(
+    activeStudents.map((student) => Number(student.id)).filter((id) => Number.isFinite(id))
+  );
 
   // Prefer billing_month (new schema), fallback to due_date-only check (old schema).
   let existingInvoices: { student_id: number; due_date: string | null }[] = [];
@@ -101,14 +125,23 @@ async function maybeGenerateMonthlyDrafts(forceRun = false) {
     const rentAmount = Number(student.advance_rent || 0);
     if (rentAmount <= 0) continue;
     if (existingKeys.has(String(student.id))) continue;
+    const cached = electricityCache[Number(student.id)];
+    const studentUnits = Number(student.electricity_units || 0);
+    const studentRate = Number(student.electricity_rate_per_unit || 0);
+    const resolvedUnits = Number.isFinite(studentUnits) && studentUnits > 0
+      ? studentUnits
+      : Number(cached?.units ?? 0);
+    const resolvedRate = Number.isFinite(studentRate) && studentRate > 0
+      ? studentRate
+      : Number(cached?.ratePerUnit ?? 12);
 
     draftsToInsert.push({
       student_id: student.id,
       billing_month: billingMonth,
       due_date: billingMonth,
       base_rent: rentAmount,
-      electricity_units: 0,
-      electricity_rate: 12,
+      electricity_units: Number.isFinite(resolvedUnits) ? resolvedUnits : 0,
+      electricity_rate: resolvedRate,
       electricity_amount: 0,
       custom_service_name: null,
       custom_service_amount: 0,
@@ -155,17 +188,42 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
   // Day-before-next-month automation: runs automatically on month-end.
   await maybeGenerateMonthlyDrafts(false);
 
-  const { data: invoices, error: fetchError } = await supabase
+  let invoices: InvoiceRow[] = [];
+  let fetchError: { message?: string } | null = null;
+
+  const { data: invoicesWithElectricity, error: invoicesWithElectricityError } = await supabase
     .from('invoices')
     .select(`
       *,
-      student_admissions ( full_name, phone, room_number, bed_number )
+      student_admissions ( full_name, phone, room_number, bed_number, electricity_units, electricity_rate_per_unit )
     `)
     .order('created_at', { ascending: false });
+
+  if (!invoicesWithElectricityError && invoicesWithElectricity) {
+    invoices = invoicesWithElectricity as InvoiceRow[];
+  } else {
+    fetchError = invoicesWithElectricityError;
+    const { data: fallbackInvoices, error: fallbackError } = await supabase
+      .from('invoices')
+      .select(`
+        *,
+        student_admissions ( full_name, phone, room_number, bed_number )
+      `)
+      .order('created_at', { ascending: false });
+    if (!fallbackError && fallbackInvoices) {
+      invoices = fallbackInvoices as InvoiceRow[];
+      fetchError = null;
+    } else if (fallbackError) {
+      fetchError = fallbackError;
+    }
+  }
 
   if (fetchError) console.error('FETCH ERROR:', fetchError.message);
 
   const typedInvoices = (invoices || []) as InvoiceRow[];
+  const studentElectricityCache = await getStudentElectricityMap(
+    typedInvoices.map((inv) => Number(inv.student_id)).filter((id) => Number.isFinite(id))
+  );
   const breakdownNotesByInvoiceId = await getBreakdownNotes(typedInvoices.map((inv) => inv.id));
   const paidAtByInvoiceId = await getPaidAtMap(typedInvoices.map((inv) => inv.id));
  
@@ -199,6 +257,8 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
     const electricityRate = Number(formData.get('electricity_rate') || 0);
     const electricityAmountSnapshot = Number(formData.get('electricity_amount_snapshot') || 0);
     const totalAmountSnapshot = Number(formData.get('total_amount_snapshot') || 0);
+    const initialMeterUnits = Number(formData.get('initial_meter_units') || 0);
+    const currentMeterUnits = Number(formData.get('current_meter_units') || 0);
     const customServicesRaw = (formData.get('custom_services_json') as string | null) || '[]';
     const additionalNotes = (formData.get('additional_notes') as string | null)?.trim() || null;
 
@@ -255,9 +315,10 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
       parsedServices = [];
     }
 
+    const computedElectricityUnits = Math.abs(Number((initialMeterUnits - currentMeterUnits).toFixed(2)));
     const electricityAmount = electricityAmountSnapshot > 0
       ? electricityAmountSnapshot
-      : electricityUnits * electricityRate;
+      : computedElectricityUnits * electricityRate;
     const customServiceAmount = parsedServices.reduce((sum, service) => sum + service.amount, 0);
     const customServiceName = parsedServices.length > 0
       ? parsedServices.map((service) => service.name).join(', ')
@@ -267,7 +328,7 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
     const finalizedAt = new Date().toISOString();
     const packedNotes = buildAdditionalNotes(additionalNotes, {
       baseRent,
-      electricityUnits,
+      electricityUnits: computedElectricityUnits,
       electricityRate,
       electricityAmount,
       customServiceName,
@@ -275,13 +336,15 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
       services: parsedServices,
       totalAmount,
       finalizedAt,
+      meterInitialUnits: initialMeterUnits,
+      meterCurrentUnits: currentMeterUnits,
     });
 
     const { error: finalizeError } = await supabase
       .from('invoices')
       .update({
         base_rent: baseRent,
-        electricity_units: electricityUnits,
+        electricity_units: computedElectricityUnits,
         electricity_rate: electricityRate,
         electricity_amount: electricityAmount,
         custom_service_name: customServiceName,
@@ -325,6 +388,21 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
 
     if (!finalizeSucceeded) {
       return redirect('/finance?error=finalize-update-failed');
+    }
+
+    if (invoice?.student_id) {
+      const { error: studentElectricityUpdateError } = await supabase
+        .from('student_admissions')
+        .update({
+          electricity_units: currentMeterUnits,
+          electricity_rate_per_unit: electricityRate,
+        })
+        .eq('id', invoice.student_id);
+      if (studentElectricityUpdateError && (studentElectricityUpdateError.message || '').includes('electricity_units')) {
+        await setStudentElectricityData(Number(invoice.student_id), currentMeterUnits, electricityRate);
+      } else {
+        await setStudentElectricityData(Number(invoice.student_id), currentMeterUnits, electricityRate);
+      }
     }
 
     // Always keep a server-side breakup cache keyed by invoice id.
@@ -501,8 +579,20 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
                 const customAmount = breakdown.customServiceAmount;
                 const customName = breakdown.customServiceName;
                 const delayInfo = delayTag(invWithCachedNotes as InvoiceRow);
+                const cached = studentElectricityCache[Number(inv.student_id)];
+                const studentElectricityUnits = Number(inv.student_admissions?.electricity_units ?? cached?.units ?? 0);
+                const studentElectricityRate = Number(inv.student_admissions?.electricity_rate_per_unit ?? cached?.ratePerUnit ?? 0);
 
                 if (isDraft) {
+                  const resolvedInitialMeterUnits = Number.isFinite(studentElectricityUnits) && studentElectricityUnits > 0
+                    ? studentElectricityUnits
+                    : electricityUnits;
+                  const resolvedRate = Number.isFinite(studentElectricityRate) && studentElectricityRate > 0
+                    ? studentElectricityRate
+                    : electricityRate;
+                  const resolvedCurrentMeterUnits = Number(inv.electricity_units ?? 0) > 0
+                    ? Number(inv.electricity_units ?? 0)
+                    : 0;
                   return (
                     <FinanceDraftRow
                       key={inv.id}
@@ -511,8 +601,9 @@ export default async function FinancePage({ searchParams }: { searchParams: Prom
                       billMonthLabel={formatBillMonth(inv.billing_month || inv.due_date)}
                       baseRent={baseRent}
                       dueDateLabel={inv.due_date ? new Date(inv.due_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '-'}
-                      initialElectricityUnits={electricityUnits}
-                      initialElectricityRate={electricityRate}
+                      initialMeterUnits={resolvedInitialMeterUnits}
+                      initialElectricityRate={resolvedRate}
+                      initialCurrentMeterUnits={resolvedCurrentMeterUnits}
                       initialCustomServices={breakdown.services}
                       additionalNotes={breakdown.plainNotes}
                       finalizeBillAction={finalizeBill}
